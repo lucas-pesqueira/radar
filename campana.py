@@ -12,6 +12,7 @@ escribe los mails y los deja como borradores en la casilla de envío.
 """
 
 import csv
+import os
 import re
 import subprocess
 import sys
@@ -52,7 +53,9 @@ def dias_habiles(desde, hasta):
 
 
 def hoy():
-    return date.today()
+    """Fecha de trabajo. Con RADAR_FECHA=AAAA-MM-DD se registra esa fecha (para preparar el envío de otro día)."""
+    f = os.environ.get("RADAR_FECHA")
+    return date.fromisoformat(f) if f else date.today()
 
 
 def nombre_prolijo(nombre):
@@ -110,7 +113,7 @@ def verificar(api, place_ids):
         "maxImages": 0,
         "maxQuestions": 0,
     }
-    run = api.arrancar(C.ACTOR_MAPS, entrada, costo_verificacion(len(place_ids)) * 1.2 + 0.01)
+    run = api.arrancar(C.ACTOR_MAPS, entrada, max(0.5, costo_verificacion(len(place_ids)) * 1.2 + 0.01))  # Apify exige un tope mínimo de USD 0,50
     inicio = time.time()
 
     def avanzar(_r):
