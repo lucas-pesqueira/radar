@@ -4,8 +4,10 @@ Uso (desde esta carpeta):
     py campana.py tanda              arma la tanda de hoy (verifica las reseñas en vivo con Apify)
     py campana.py tanda --prueba     igual, pero sin Apify y sin guardar nada (para probar)
     py campana.py respondio MAIL     el negocio respondió: no recibe más seguimientos
-    py campana.py baja MAIL          pidió no recibir más mails: no se le escribe nunca más
+    py campana.py baja MAIL          pidió no recibir más mails: no se le escribe nunca más (ni a nadie de su dominio)
+    py campana.py rebote MAIL        el mail rebotó (dirección inválida): no se vuelve a usar
     py campana.py estado             resumen de la campaña
+    py campana.py metricas           envíos, respuestas y tasa por rubro, ciudad y prioridad
 
 La tanda queda en prospectos/campana/tandas/tanda_<fecha>.json. Con ese archivo Claude
 escribe los mails y los deja como borradores en la casilla de envío.
@@ -37,6 +39,23 @@ BAJAS = DIR / "bajas.json"
 TANDAS = DIR / "tandas"
 PROSPECTOS = BASE / "prospectos" / "prospectos_todos.csv"
 ORDEN_PRIORIDAD = {"A": 0, "B": 1, "C": 2}
+# Dominios de mail personal: una baja de alguien con gmail no bloquea a todo gmail.
+DOMINIOS_LIBRES = {"gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "hotmail.com", "outlook.com",
+                   "live.com", "msn.com", "aol.com", "icloud.com", "me.com", "proton.me", "protonmail.com",
+                   "comcast.net", "att.net", "sbcglobal.net", "verizon.net", "cox.net", "bellsouth.net"}
+
+
+def dominio(email):
+    return str(email or "").strip().lower().rpartition("@")[2]
+
+
+def dominios_bloqueados(bajas):
+    """Dominios de empresa con al menos una baja: no se le escribe a nadie de ahí."""
+    return {dominio(e) for e in bajas if dominio(e) and dominio(e) not in DOMINIOS_LIBRES}
+
+
+def esta_bloqueado(email, bajas, doms):
+    return email.lower() in bajas or dominio(email) in doms
 
 
 # ---------------------------------------------------------------------------
@@ -147,13 +166,14 @@ def cmd_tanda(prueba=False, limite=None):
     limite = limite or C.ENVIOS_POR_DIA
     registro = leer_json(REGISTRO, {})
     bajas = set(leer_json(BAJAS, []))
+    doms = dominios_bloqueados(bajas)
     d = hoy().isoformat()
     ya_hoy = [e for e, r in registro.items() if d in r.get("fechas", {}).values()]
     if ya_hoy and not prueba:
         sys.exit(f"Ya se armó una tanda hoy ({len(ya_hoy)} mails). La próxima, mañana.")
 
     # 1) Seguimientos primero: son los que ya están en conversación.
-    segs = [(e, n) for e, n in seguimientos_pendientes(registro) if e not in bajas][:limite]
+    segs = [(e, n) for e, n in seguimientos_pendientes(registro) if not esta_bloqueado(e, bajas, doms)][:limite]
     items = []
     for email, n in segs:
         r = registro[email]
@@ -166,7 +186,8 @@ def cmd_tanda(prueba=False, limite=None):
     nuevos, salteados = [], []
     if cupo > 0:
         contactados = set(registro) | bajas
-        cand = [p for p in cargar_prospectos() if p["email"].lower() not in contactados]
+        cand = [p for p in cargar_prospectos()
+                if p["email"].lower() not in contactados and dominio(p["email"]) not in doms]
         cand = intercalar_rubros(cand)
         # Se verifican algunos de más por si alguno ya respondió sus reseñas.
         a_verificar = cand[:cupo + max(3, cupo // 4)]
@@ -230,7 +251,7 @@ def cmd_tanda(prueba=False, limite=None):
         for it in nuevos:
             registro[it["email"].lower()] = {
                 "negocio": it["negocio"], "rubro": it["rubro"], "precio": it["precio"],
-                "ciudad": it["ciudad"], "place_id": it["place_id"],
+                "ciudad": it["ciudad"], "place_id": it["place_id"], "prioridad": it.get("prioridad", ""),
                 "asunto": f"{it['negocio']}'s Google reviews",
                 "estado": "enviado", "fechas": {"enviado": d},
             }
@@ -314,6 +335,27 @@ def cmd_estado():
         print(f"Tasa de respuesta: {100 * resp / len(registro):.1f}%")
 
 
+def cmd_metricas():
+    """Envíos, respuestas y tasa por rubro, ciudad y prioridad. Con pocos envíos los números son ruido."""
+    registro = leer_json(REGISTRO, {})
+    if not registro:
+        print("Todavía no hay envíos registrados.")
+        return
+    print(f"Envíos: {len(registro)}. Con menos de ~100 envíos por grupo, las diferencias no son confiables.")
+    for titulo, campo in (("Rubro", "rubro"), ("Ciudad", "ciudad"), ("Prioridad", "prioridad")):
+        grupos = {}
+        for r in registro.values():
+            g = grupos.setdefault(r.get(campo) or "(sin dato)", {"env": 0, "resp": 0, "baja": 0, "reb": 0})
+            g["env"] += 1
+            g["resp"] += 1 if "respondió" in r.get("fechas", {}) else 0
+            g["baja"] += 1 if r.get("estado") == "baja" else 0
+            g["reb"] += 1 if r.get("estado") == "rebotó" else 0
+        print(f"\nPor {titulo.lower()}:")
+        for nombre, g in sorted(grupos.items(), key=lambda x: -x[1]["env"]):
+            print(f"  {nombre}: {g['env']} enviados | {g['resp']} respondieron ({100 * g['resp'] / g['env']:.0f}%)"
+                  f" | {g['baja']} bajas | {g['reb']} rebotes")
+
+
 # ---------------------------------------------------------------------------
 # Sincronización del registro entre PC (vía Git)
 # ---------------------------------------------------------------------------
@@ -377,9 +419,16 @@ def main():
             sync_antes()
             cmd_marcar(args[1], "baja")
             sync_despues(f"Baja {args[1]}")
+        elif cmd in ("rebote", "rebotó") and len(args) > 1:
+            sync_antes()
+            cmd_marcar(args[1], "rebotó")
+            sync_despues(f"Rebote {args[1]}")
         elif cmd == "estado":
             sync_antes()
             cmd_estado()
+        elif cmd in ("metricas", "métricas"):
+            sync_antes()
+            cmd_metricas()
         else:
             print(__doc__)
     except ErrorApify as e:
