@@ -168,9 +168,13 @@ def cmd_tanda(prueba=False, limite=None):
     bajas = set(leer_json(BAJAS, []))
     doms = dominios_bloqueados(bajas)
     d = hoy().isoformat()
-    ya_hoy = [e for e, r in registro.items() if d in r.get("fechas", {}).values()]
+    ya_hoy = [e for e, r in registro.items()
+              if r.get("estado") != "descartado" and d in r.get("fechas", {}).values()]
     if ya_hoy and not prueba:
-        sys.exit(f"Ya se armó una tanda hoy ({len(ya_hoy)} mails). La próxima, mañana.")
+        limite -= len(ya_hoy)
+        if limite <= 0:
+            sys.exit(f"Ya se armó la tanda de hoy ({len(ya_hoy)} mails). La próxima, mañana.")
+        print(f"Hoy ya hay {len(ya_hoy)} mails armados: se arman {limite} más para completar el cupo.")
 
     # 1) Seguimientos primero: son los que ya están en conversación.
     segs = [(e, n) for e, n in seguimientos_pendientes(registro) if not esta_bloqueado(e, bajas, doms)][:limite]
@@ -245,6 +249,8 @@ def cmd_tanda(prueba=False, limite=None):
              "salteados": [{"negocio": n, "motivo": m} for n, m in salteados]}
     TANDAS.mkdir(parents=True, exist_ok=True)
     archivo = TANDAS / f"tanda_{d}{'_prueba' if prueba else ''}.json"
+    if archivo.exists() and not prueba:                              # tanda completada el mismo día: no pisar la anterior
+        archivo = TANDAS / f"tanda_{d}_completar.json"
     guardar_json(archivo, tanda)
 
     if not prueba:
@@ -321,7 +327,7 @@ def cmd_marcar(email, estado):
 
 
 def cmd_estado():
-    registro = leer_json(REGISTRO, {})
+    registro = {k: v for k, v in leer_json(REGISTRO, {}).items() if v.get("estado") != "descartado"}
     bajas = leer_json(BAJAS, [])
     cuenta = {}
     for r in registro.values():
@@ -337,7 +343,7 @@ def cmd_estado():
 
 def cmd_metricas():
     """Envíos, respuestas y tasa por rubro, ciudad y prioridad. Con pocos envíos los números son ruido."""
-    registro = leer_json(REGISTRO, {})
+    registro = {k: v for k, v in leer_json(REGISTRO, {}).items() if v.get("estado") != "descartado"}
     if not registro:
         print("Todavía no hay envíos registrados.")
         return
@@ -419,6 +425,10 @@ def main():
             sync_antes()
             cmd_marcar(args[1], "baja")
             sync_despues(f"Baja {args[1]}")
+        elif cmd in ("descartar", "descartado") and len(args) > 1:
+            sync_antes()
+            cmd_marcar(args[1], "descartado")
+            sync_despues(f"Descartado {args[1]}")
         elif cmd in ("rebote", "rebotó") and len(args) > 1:
             sync_antes()
             cmd_marcar(args[1], "rebotó")
