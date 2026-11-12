@@ -326,7 +326,7 @@ PALABRAS_NEGATIVAS = [
 # ===========================================================================
 # CAMPAÑA DE MAILS
 # ===========================================================================
-ENVIOS_POR_DIA = 5               # total por casilla y por día, contando seguimientos
+ENVIOS_POR_DIA = 10              # total por casilla y por día, contando seguimientos
 SEGUIMIENTO_DIAS = (3, 7)        # días hábiles desde el primer mail para cada seguimiento
 VERIFICAR_RESENAS = 5            # reseñas que se vuelven a bajar para chequear el gancho
 PRECIO_RUBRO = {                 # precio de fundador en USD por mes
