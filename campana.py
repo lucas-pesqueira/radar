@@ -169,7 +169,9 @@ def cmd_tanda(prueba=False, limite=None):
     doms = dominios_bloqueados(bajas)
     d = hoy().isoformat()
     ya_hoy = [e for e, r in registro.items()
-              if r.get("estado") != "descartado" and d in r.get("fechas", {}).values()]
+              if r.get("estado") != "descartado" and any(
+                  v == d for k, v in r.get("fechas", {}).items()
+                  if k == "enviado" or k.startswith("seguimiento"))]
     if ya_hoy and not prueba:
         limite -= len(ya_hoy)
         if limite <= 0:
