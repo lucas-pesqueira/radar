@@ -5,24 +5,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from test_campana import camp, tanda, reg, registro_enviado  # noqa: F401  (fixture y ayudas)
+from ayudas import GmailFalso, texto_bien
 
 ART = timezone(timedelta(hours=-3))
-
-
-class GmailFalso:
-    def __init__(self, borradores):
-        self.b = borradores                      # {id: (para, asunto)}
-        self.mandados = []
-
-    def borradores(self):
-        out = {}
-        for did, (para, asunto) in self.b.items():
-            out.setdefault(para.lower(), []).append((did, asunto))
-        return out
-
-    def mandar(self, did):
-        assert did in self.b, "mandó un borrador que no existe"
-        self.mandados.append(self.b.pop(did)[0])
 
 
 @pytest.fixture
@@ -32,6 +17,11 @@ def env(camp, monkeypatch):
     importlib.reload(E)
     monkeypatch.setattr(E, "K", camp)
     monkeypatch.setattr(camp.C, "CONFIRMAR_AL_DIA_SIGUIENTE", False)
+    import control as X
+    importlib.reload(X)
+    monkeypatch.setattr(X, "K", camp)
+    monkeypatch.setattr(E, "X", X)
+    monkeypatch.setattr(GmailFalso, "REGISTRO", camp.REGISTRO)
     return E
 
 

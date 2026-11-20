@@ -11,6 +11,7 @@ Uso (desde esta carpeta):
     py campana.py baja MAIL          pidió no recibir más mails: no se le escribe nunca más (ni a nadie de su dominio)
     py campana.py rebote MAIL        el mail rebotó (dirección inválida): no se vuelve a usar
     py campana.py descartar MAIL     el mail armado no se manda (primer mail: se descarta; seguimiento: queda para otro día)
+    py campana.py destrabar          destraba el freno de emergencia (después de revisar rebotes o bajas)
     py campana.py estado             resumen de la campaña
     py campana.py metricas           envíos, respuestas y tasa por rubro, ciudad y prioridad
 
@@ -273,7 +274,7 @@ def verificar(api, place_ids):
         "maxImages": 0,
         "maxQuestions": 0,
     }
-    run = api.arrancar(C.ACTOR_MAPS, entrada, max(0.5, costo_verificacion(len(place_ids)) * 1.2 + 0.01))  # Apify exige un tope mínimo de USD 0,50
+    run = api.arrancar(C.ACTOR_MAPS, entrada, tope_verificacion(len(place_ids)))
     inicio = time.time()
 
     def avanzar(_r):
@@ -389,8 +390,17 @@ def evaluar(p, lugar, cuando, verificado):
     }, ""
 
 
+VERIFICACION = {"rondas": 0, "gasto": 0.0, "credito_libre": None}   # lo de la última tanda (para alertas)
+
+
+def tope_verificacion(n):
+    """Lo que se reserva en Apify por corrida: Apify exige un tope mínimo de USD 0,50."""
+    return max(0.5, costo_verificacion(n) * 1.2 + 0.01)
+
+
 def elegir_nuevos(cand, cupo, prueba, doms_usados):
     """Recorre los candidatos en rondas (verificando con Apify) hasta llenar el cupo."""
+    VERIFICACION.update(rondas=0, gasto=0.0, credito_libre=None)
     nuevos, salteados, pos, rondas = [], [], 0, 0
     guardados = None
     api = None
@@ -413,11 +423,15 @@ def elegir_nuevos(cand, cupo, prueba, doms_usados):
             if ids:
                 api = api or Apify(token())
                 usado, maximo = api.credito()
-                costo = costo_verificacion(len(ids))
+                costo = tope_verificacion(len(ids))
+                if usado is not None and maximo:
+                    VERIFICACION["credito_libre"] = round(maximo - usado - VERIFICACION["gasto"], 2)
                 if usado is not None and maximo and maximo - usado < costo:
                     sys.exit(f"No alcanza el crédito de Apify para verificar (hace falta USD {costo:.2f}).")
                 print(f"Verificando {len(ids)} negocios en Google Maps (ronda {rondas}, como máximo USD {costo:.2f})...")
                 frescos = verificar(api, ids)
+                VERIFICACION["rondas"] = rondas
+                VERIFICACION["gasto"] += costo
         ahora = datetime.now(timezone.utc)
         for p in lote:
             if len(nuevos) >= cupo:
@@ -500,9 +514,14 @@ def cmd_tanda(prueba=False, limite=None, forzar=False, auto=False):
                       "rubro": r["rubro"], "precio": r["precio"], "ciudad": r["ciudad"],
                       "asunto": r["asunto"], "enviado": r["fechas"]["enviado"]})
 
-    # 2) Prospectos nuevos para completar el cupo.
+    # 2) Prospectos nuevos para completar el cupo (salvo con el freno de emergencia activo).
+    import control as X
     cupo = limite - len(items)
     nuevos, salteados = [], []
+    if cupo > 0 and X.freno_activo() and not prueba:
+        print(f"FRENO ACTIVO ({X.leer_freno().get('motivo')}): hoy solo seguimientos, sin primeros mails. "
+              f"Revisalo y destrabalo con: py campana.py destrabar")
+        cupo = 0
     if cupo > 0:
         contactados = set(registro) | bajas
         doms_usados = set(doms) | {dominio_empresa(e) for e, r in registro.items()
@@ -532,6 +551,15 @@ def cmd_tanda(prueba=False, limite=None, forzar=False, auto=False):
             if it["tipo"] != "primer mail":
                 registro[it["email"]]["armado"] = {"tipo": it["tipo"], "fecha": d, "envio_utc": it["envio_utc"]}
         guardar_seguro(REGISTRO, registro)
+        X.anotar_tanda(d, {"fecha": d, "primeros": len(nuevos), "nuevos": len(nuevos),
+                           "seguimientos": len(segs), "cupo_nuevos": max(cupo, 0),
+                           "salteados": len(salteados), "rondas": VERIFICACION["rondas"],
+                           "gasto_estimado": round(VERIFICACION["gasto"], 2),
+                           "credito_libre": VERIFICACION["credito_libre"],
+                           "freno": X.freno_activo()})
+        m = X.actualizar(registro, bajas, d)
+        for a in m["alertas"]:
+            print(f"  ALERTA: {a}")
 
     print(f"\nTanda de {d}{' (prueba)' if prueba else ''}: {len(nuevos)} primeros mails + {len(segs)} seguimientos"
           f" = {len(items)} de {limite}")
@@ -643,6 +671,9 @@ def cmd_estado():
     resp = cuenta.get("respondió", 0)
     if enviados:
         print(f"Tasa de respuesta: {100 * resp / enviados:.1f}%")
+    import control as X
+    for a in X.calcular(leer_registro(), bajas, hoy().isoformat())["alertas"]:
+        print(f"ALERTA: {a}")
 
 
 def cmd_metricas():
@@ -729,9 +760,17 @@ def main():
             hecha = cmd_tanda(prueba=prueba, forzar="--forzar" in args, auto=auto)
             if hecha and not prueba:
                 sync_despues(f"Tanda {hoy().isoformat()}", estricto=auto)
+        elif cmd == "destrabar":
+            import control as X
+            sync_antes()
+            if X.destrabar(hoy().isoformat()):
+                X.actualizar(leer_registro(), leer_bajas(), hoy().isoformat())
+                sync_despues("Freno destrabado")
         elif cmd in MARCAS and len(args) > 1:
+            import control as X
             sync_antes()
             cmd_marcar(args[1], MARCAS[cmd])
+            X.actualizar(leer_registro(), leer_bajas(), hoy().isoformat())
             sync_despues(f"{MARCAS[cmd].capitalize()} {args[1]}")
         elif cmd == "estado":
             sync_antes()

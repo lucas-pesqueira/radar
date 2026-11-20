@@ -347,3 +347,13 @@ SEPARACION_MIN = (11, 17)        # minutos entre un mail y el siguiente de la mi
 # False: los mails los manda enviar.py (GitHub Actions) y los marca como enviados al mandarlos.
 # True solo si se vuelve a programar a mano en Gmail: lo armado se da por enviado al día siguiente.
 CONFIRMAR_AL_DIA_SIGUIENTE = False
+
+# ---------------------------------------------------------------------------
+# Controles de la campaña automática (control.py)
+# ---------------------------------------------------------------------------
+FRENO_DESDE = "2026-11-23"       # el freno cuenta solo lo enviado desde esta fecha (los rebotes viejos ya se trataron)
+FRENO_REBOTES = (2, 30)          # más de 2 rebotes en los últimos 30 primeros mails -> se frenan los primeros mails
+FRENO_BAJAS_DIA = 2              # más de 2 bajas en un mismo día -> se frenan los primeros mails
+ALERTA_STOCK_AB = 150            # avisar cuando queden menos prospectos A/B sin contactar
+ALERTA_CREDITO_DIAS = 5          # avisar cuando el crédito de Apify alcance para menos tandas
+ALERTA_TANDA_MIN = 15            # avisar si una tanda sale con menos primeros mails que esto

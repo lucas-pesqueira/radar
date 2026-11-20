@@ -16,11 +16,11 @@ En la duda, siempre para el lado seguro: una respuesta que no se entiende cuenta
 
 import base64
 import re
+from html import unescape
 from email.utils import getaddresses, parseaddr
 
 import campana as K
 
-ESTADO_BANDEJA = K.DIR / "bandeja.json"     # ids de los mails ya revisados (para no procesarlos dos veces)
 GUARDAR_IDS = 3000
 BUSQUEDA = "in:inbox -from:me newer_than:4d"
 
@@ -51,20 +51,24 @@ def _decodificar(data):
         return ""
 
 
-def texto_de(payload):
-    """Todo el texto legible del mail (partes text/* y message/*), sin HTML."""
+def texto_de(payload, preferir_plano=False):
+    """Todo el texto legible del mail (partes text/* y message/*), sin HTML.
+    Con preferir_plano, si hay versión de texto plano se usa solo esa (sin la copia en HTML)."""
     partes, pila = [], [payload or {}]
     while pila:
         p = pila.pop()
-        pila.extend(p.get("parts") or [])
+        pila.extend(reversed(p.get("parts") or []))
         tipo = (p.get("mimeType") or "").lower()
         data = (p.get("body") or {}).get("data")
         if data and (tipo.startswith("text/") or tipo.startswith("message/")):
             t = _decodificar(data)
             if tipo == "text/html":
+                t = unescape(re.sub(r"<br\s*/?>", "\n", t, flags=re.I))
                 t = re.sub(r"<[^>]+>", " ", t)
-            partes.append(t)
-    return "\n".join(partes)
+            partes.append((tipo, t))
+    if preferir_plano and any(t == "text/plain" for t, _ in partes):
+        partes = [x for x in partes if x[0] == "text/plain"]
+    return "\n".join(t for _, t in partes)
 
 
 def respuesta_nueva(texto):
@@ -157,12 +161,17 @@ def marcar(registro, bajas, email, estado, dia, extra=()):
     return True
 
 
+def estado_bandeja():
+    """campana/bandeja.json: ids de los mails ya revisados (para no procesarlos dos veces)."""
+    return K.DIR / "bandeja.json"
+
+
 def leer_vistos():
-    return list(K.leer_estricto(ESTADO_BANDEJA, {}, dict).get("vistos", []))
+    return list(K.leer_estricto(estado_bandeja(), {}, dict).get("vistos", []))
 
 
 def guardar_vistos(vistos):
-    K.guardar_json(ESTADO_BANDEJA, {"vistos": vistos[-GUARDAR_IDS:]})
+    K.guardar_json(estado_bandeja(), {"vistos": vistos[-GUARDAR_IDS:]})
 
 
 def revisar(gmail, registro, bajas, dia):

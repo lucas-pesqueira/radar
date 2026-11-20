@@ -8,6 +8,10 @@ Uso (desde esta carpeta):
 Antes de mandar lee la bandeja (bandeja.py) y marca solo respuestas, bajas y rebotes: a quien
 respondió, pidió la baja o rebotó no le sale nada más, aunque tenga el borrador listo.
 
+Antes de mandar cada borrador lo revisa con reglas fijas (control.py): firma, dirección y línea de
+baja, precio, sin links, nombre del negocio y asunto. Si algo no cuadra, no sale y avisa.
+Con el freno de emergencia activo (muchos rebotes o bajas), no salen primeros mails, solo seguimientos.
+
 Cómo decide:
 - Solo manda mails que están "armados" para hoy en el registro y cuya hora (envio_utc) ya llegó.
 - Busca en Gmail el borrador dirigido a ese mail. Si no hay borrador, no manda nada:
@@ -32,6 +36,7 @@ import requests
 
 import bandeja as B
 import campana as K
+import control as X
 from estudio import BASE
 
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -108,6 +113,11 @@ class Gmail:
     def mandar(self, draft_id):
         return self._pedir("POST", "/drafts/send", json={"id": draft_id})
 
+    def borrador(self, draft_id):
+        """Texto del borrador (versión de texto plano)."""
+        d = self._pedir("GET", f"/drafts/{draft_id}", params={"format": "full"})
+        return B.texto_de(d.get("message", {}).get("payload"), preferir_plano=True)
+
     def ids_bandeja(self, consulta):
         """Ids de los mails de la bandeja que cumplen la búsqueda (más viejos primero)."""
         ids, token = [], None
@@ -166,17 +176,31 @@ def enviar(prueba=False, ahora=None, gmail=None):
         return [], []
     gmail = gmail or Gmail()
     borradores = gmail.borradores()
+    asuntos = {did: asunto for lista in borradores.values() for did, asunto in lista}
+    frenado = X.freno_activo()
     enviados, problemas = [], []
     for cuando, email in pendientes:
         r = registro[email]
         tipo = r["armado"]["tipo"]
+        avisar = ahora - cuando < AVISO                             # se avisa una sola vez, no cada 15 minutos
+        if frenado and tipo == "primer mail":
+            print(f"  FRENADO  {tipo:<14} {email}: freno de emergencia activo")
+            continue
         draft, cuantos = elegir_borrador(email, r.get("asunto", ""), borradores)
+        motivo = None
         if not draft:
             motivo = "no hay borrador (no aprobado o ya mandado a mano)" if not cuantos else \
                 f"hay {cuantos} borradores para ese mail y no sé cuál es"
+        else:
+            fallas = X.revisar_borrador(gmail.borrador(draft), asuntos.get(draft, ""), r, tipo)
+            if fallas:
+                motivo = "el borrador no pasó el control: " + "; ".join(fallas)
+        if motivo:
             print(f"  NO SALE  {tipo:<14} {email}: {motivo}")
-            if ahora - cuando < AVISO:                              # se avisa una sola vez, no cada 15 minutos
+            if avisar:
                 problemas.append((email, motivo))
+                if not prueba:
+                    X.anotar(dia, "no_salieron", {"email": email, "tipo": tipo, "motivo": motivo}, "email")
             continue
         if prueba:
             print(f"  saldría  {tipo:<14} {email} ({r['negocio']})")
@@ -186,6 +210,8 @@ def enviar(prueba=False, ahora=None, gmail=None):
         enviados.append(email)
         print(f"  ENVIADO  {tipo:<14} {email} ({r['negocio']})")
         K.guardar_seguro(K.REGISTRO, registro)                   # se guarda después de cada envío
+        X.anotar(dia, "enviados", {"email": email, "tipo": tipo, "hora_utc": ahora.isoformat(timespec="minutes")},
+                 "email")
     return enviados, problemas
 
 
@@ -205,6 +231,8 @@ def revisar_bandeja(gmail, dia):
     if marcas:
         K.guardar_seguro(K.BAJAS, bajas)
         K.guardar_seguro(K.REGISTRO, registro)
+        for e, estado, remitente, resumen in marcas:
+            X.anotar(dia, "marcados", {"email": e, "estado": estado, "de": remitente, "texto": resumen[:120]})
     if vistos:
         B.guardar_vistos(B.leer_vistos() + vistos)
     return marcas, vistos
@@ -222,6 +250,12 @@ def rehacer(enviados, marcas, vistos, dia):
             K.aplicar_envio(r, dia)
     K.guardar_json(K.REGISTRO, registro)
     K.guardar_json(K.BAJAS, bajas)
+    for e, estado, remitente, resumen in marcas:
+        X.anotar(dia, "marcados", {"email": e, "estado": estado, "de": remitente, "texto": resumen[:120]})
+    for e in enviados:
+        X.anotar(dia, "enviados", {"email": e, "tipo": (registro.get(e) or {}).get("estado", "")}, "email")
+    X.activar_freno(registro, dia)
+    X.actualizar(registro, bajas, dia)
     if vistos:
         B.guardar_vistos(B.leer_vistos() + [v for v in vistos if v not in set(B.leer_vistos())])
 
@@ -267,12 +301,24 @@ def main():
             K.sync_antes()
             gmail = Gmail()
             marcas, vistos = revisar_bandeja(gmail, dia)
+        frenado_ahora = None
+        if not prueba:
+            frenado_ahora = X.activar_freno(K.leer_registro(), dia)
+            if frenado_ahora:
+                print(f"FRENO DE EMERGENCIA: {frenado_ahora}. No salen primeros mails hasta destrabarlo.")
         enviados, problemas = enviar(prueba=prueba, gmail=gmail)
-        if enviados or marcas or vistos:
+        if frenado_ahora:
+            problemas.append(("FRENO", frenado_ahora))
+        if not prueba:
+            m = X.actualizar(K.leer_registro(), K.leer_bajas(), dia)
+            for a in m["alertas"]:
+                print(f"ALERTA: {a}")
+        if enviados or marcas or vistos or frenado_ahora or problemas:
             subir(enviados, dia, marcas, vistos)
         if problemas and not prueba:
             # Termina con error para que GitHub avise por mail.
-            sys.exit(f"{len(problemas)} mails no salieron. Revisá los borradores.")
+            detalle = "\n".join(f"  {e}: {m}" for e, m in problemas)
+            sys.exit(f"{len(problemas)} avisos:\n{detalle}")
     except ErrorGmail as e:
         sys.exit(f"Error de Gmail: {e}")
 
