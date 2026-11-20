@@ -326,9 +326,24 @@ PALABRAS_NEGATIVAS = [
 # ===========================================================================
 # CAMPAÑA DE MAILS
 # ===========================================================================
-ENVIOS_POR_DIA = 20              # total por casilla y por día, contando seguimientos
+ENVIOS_POR_DIA = 25              # total por casilla y por día, contando seguimientos
 SEGUIMIENTO_DIAS = (3, 7)        # días hábiles desde el primer mail para cada seguimiento
 VERIFICAR_RESENAS = 5            # reseñas que se vuelven a bajar para chequear el gancho
 PRECIO_RUBRO = {                 # precio de fundador en USD por mes
     "administradoras": 99, "mudanzas": 99, "restaurantes": 59, "unas": 59,
 }
+VERIFICAR_RONDAS = 4             # máximo de corridas de Apify por tanda para completar el cupo
+
+# Horario de envío: cada mail sale cerca de las 10 de la mañana en la ciudad del destinatario.
+ZONAS_CIUDAD = {                 # palabra en el nombre de la ciudad -> zona horaria
+    "atlanta": "America/New_York",
+    "houston": "America/Chicago",
+    "los angeles": "America/Los_Angeles",
+}
+ZONA_LUCAS = "America/Argentina/Buenos_Aires"
+HORA_LOCAL_ENVIO = 10            # primer mail de cada ciudad a esta hora local
+SEPARACION_MIN = (11, 17)        # minutos entre un mail y el siguiente de la misma ciudad (al azar)
+
+# Hasta que exista el envío automático, una tanda armada se da por enviada al día siguiente.
+# Con el envío automático en marcha se pasa a False: lo marca el script de envío al mandar.
+CONFIRMAR_AL_DIA_SIGUIENTE = True

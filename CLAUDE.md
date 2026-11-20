@@ -13,7 +13,11 @@ Herramienta de Lucas para armar listas de negocios de EEUU (administradoras, mud
 - `prospectos/` es otro repo, privado (`radar-datos`), anidado dentro de este. Ahí viven la lista de prospectos y el registro de la campaña (`prospectos/campana/`: `registro.json`, `bajas.json` y `tandas/`). `campana.py` hace `git pull` antes y `git push` después. Si avisa que no pudo sincronizar, no seguir hasta resolverlo.
 - Las bajas se respetan siempre (CAN-SPAM). Quien pidió baja no recibe más mails.
 - Antes de armar una tanda, revisar `ENVIOS_POR_DIA` en `config.py` (calentamiento: semana 1 unos 5 por día, semana 2 de 10 a 15, desde la semana 3 hasta 25).
-- `py campana.py tanda` anota a los prospectos como enviados al armarse: correrlo solo el día del envío.
+- `py campana.py tanda` anota a los prospectos como "armado" con su hora de envío. Mientras `CONFIRMAR_AL_DIA_SIGUIENTE` esté en True, lo armado se da por enviado al día siguiente; con el envío automático se pasa a False y lo marca el script de envío.
+- No se arman tandas en fin de semana ni en feriados de EEUU (Thanksgiving, Black Friday, Navidad, etc.), salvo con `--forzar`.
+- Un solo negocio por dominio de empresa en toda la campaña.
+- Si `registro.json` o `bajas.json` están rotos, el script frena. Hay copias locales en `datos/backups/`.
+- Los tests (`tests/`) usan datos inventados: este repo es público, nunca poner datos reales ahí.
 - Los mails salen como borradores y se revisan antes de mandarse. Firma: Lucas Pesqueira / Tinko Projects, con dirección postal y línea de baja.
 
 ## Comandos
@@ -21,6 +25,10 @@ Herramienta de Lucas para armar listas de negocios de EEUU (administradoras, mud
 - `py campana.py tanda` — arma la tanda de hoy (verifica reseñas en vivo con Apify)
 - `py campana.py respondio MAIL` — marca que respondió
 - `py campana.py baja MAIL` — pidió no recibir más mails
+- `py campana.py rebote MAIL` — el mail rebotó
+- `py campana.py descartar MAIL` — un mail armado no se manda (primer mail: se descarta; seguimiento: queda para otro día)
+- `py campana.py enviado MAIL` — el mail armado salió (lo usa el envío automático)
+- `py -m pytest -q` — corre los tests (también corren solos en GitHub con cada push)
 - Detalle de cada paso: ver `LEEME.md`
 
 ## Trabajo entre dos PC

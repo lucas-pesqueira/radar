@@ -3,19 +3,25 @@
 Uso (desde esta carpeta):
     py campana.py tanda              arma la tanda de hoy (verifica las reseñas en vivo con Apify)
     py campana.py tanda --prueba     igual, pero sin Apify y sin guardar nada (para probar)
+    py campana.py tanda --forzar     arma aunque hoy sea fin de semana o feriado en EEUU
+    py campana.py enviado MAIL       el mail armado para ese prospecto salió (lo usa el envío automático)
     py campana.py respondio MAIL     el negocio respondió: no recibe más seguimientos
     py campana.py baja MAIL          pidió no recibir más mails: no se le escribe nunca más (ni a nadie de su dominio)
     py campana.py rebote MAIL        el mail rebotó (dirección inválida): no se vuelve a usar
+    py campana.py descartar MAIL     el mail armado no se manda (primer mail: se descarta; seguimiento: queda para otro día)
     py campana.py estado             resumen de la campaña
     py campana.py metricas           envíos, respuestas y tasa por rubro, ciudad y prioridad
 
-La tanda queda en prospectos/campana/tandas/tanda_<fecha>.json. Con ese archivo Claude
-escribe los mails y los deja como borradores en la casilla de envío.
+La tanda queda en prospectos/campana/tandas/tanda_<fecha>.json, con la hora de envío de cada mail.
+Con ese archivo Claude escribe los mails y los deja como borradores en la casilla de envío.
 """
 
 import csv
+import json
 import os
+import random
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -28,6 +34,12 @@ from estudio import BASE, guardar_json, leer_json, token
 from prospectar import es_espanol, gancho
 
 try:
+    from zoneinfo import ZoneInfo
+    ZoneInfo(C.ZONA_LUCAS)
+except Exception:                                                   # Windows sin el paquete tzdata
+    ZoneInfo = None
+
+try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 except (AttributeError, ValueError):
     pass
@@ -38,20 +50,28 @@ REGISTRO = DIR / "registro.json"
 BAJAS = DIR / "bajas.json"
 TANDAS = DIR / "tandas"
 PROSPECTOS = BASE / "prospectos" / "prospectos_todos.csv"
+BACKUPS = BASE / "datos" / "backups"   # fuera de los dos repos: copias locales antes de cada cambio
 ORDEN_PRIORIDAD = {"A": 0, "B": 1, "C": 2}
 # Dominios de mail personal: una baja de alguien con gmail no bloquea a todo gmail.
 DOMINIOS_LIBRES = {"gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "hotmail.com", "outlook.com",
                    "live.com", "msn.com", "aol.com", "icloud.com", "me.com", "proton.me", "protonmail.com",
                    "comcast.net", "att.net", "sbcglobal.net", "verizon.net", "cox.net", "bellsouth.net"}
+TIPOS_ENVIO = ("primer mail", "seguimiento 1", "seguimiento 2")
 
 
 def dominio(email):
     return str(email or "").strip().lower().rpartition("@")[2]
 
 
+def dominio_empresa(email):
+    """Dominio propio del negocio, o vacío si es un mail personal (gmail, yahoo...)."""
+    d = dominio(email)
+    return "" if not d or d in DOMINIOS_LIBRES else d
+
+
 def dominios_bloqueados(bajas):
     """Dominios de empresa con al menos una baja: no se le escribe a nadie de ahí."""
-    return {dominio(e) for e in bajas if dominio(e) and dominio(e) not in DOMINIOS_LIBRES}
+    return {dominio_empresa(e) for e in bajas} - {""}
 
 
 def esta_bloqueado(email, bajas, doms):
@@ -59,14 +79,94 @@ def esta_bloqueado(email, bajas, doms):
 
 
 # ---------------------------------------------------------------------------
-# Utilidades
+# Archivos: si algo está roto se frena, nunca se sigue con datos vacíos
 # ---------------------------------------------------------------------------
+def leer_estricto(p, defecto, tipo):
+    """Lee un JSON del registro. Si no existe, devuelve el defecto. Si existe y está roto, corta:
+    seguir con un registro vacío haría escribirle de nuevo a todos (o a quien pidió la baja)."""
+    if not p.exists():
+        return defecto
+    try:
+        datos = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        sys.exit(f"El archivo {p.name} está roto ({e}).\nNo sigo para no escribirle a quien no corresponde.\n"
+                 f"Copias de seguridad en: {BACKUPS}\nRecuperalo (o pedile ayuda a Claude) antes de seguir.")
+    if not isinstance(datos, tipo):
+        sys.exit(f"El archivo {p.name} no tiene el formato esperado. No sigo.")
+    return datos
+
+
+def leer_registro():
+    return leer_estricto(REGISTRO, {}, dict)
+
+
+def leer_bajas():
+    return {str(e).strip().lower() for e in leer_estricto(BAJAS, [], list)}
+
+
+def guardar_seguro(p, datos):
+    """Guarda haciendo antes una copia del archivo anterior (se guardan las últimas 60)."""
+    if p.exists():
+        BACKUPS.mkdir(parents=True, exist_ok=True)
+        marca = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        shutil.copy2(p, BACKUPS / f"{p.stem}_{marca}.json")
+        viejas = sorted(BACKUPS.glob(f"{p.stem}_*.json"))
+        for v in viejas[:-60]:
+            v.unlink(missing_ok=True)
+    guardar_json(p, datos)
+
+
+# ---------------------------------------------------------------------------
+# Días hábiles en EEUU
+# ---------------------------------------------------------------------------
+def _n_esimo(anio, mes, dia_semana, n):
+    """n-ésimo día de la semana del mes (n=-1: el último). dia_semana: 0 = lunes."""
+    if n > 0:
+        d = date(anio, mes, 1)
+        d += timedelta(days=(dia_semana - d.weekday()) % 7)
+        return d + timedelta(weeks=n - 1)
+    d = date(anio + (mes == 12), mes % 12 + 1, 1) - timedelta(days=1)
+    return d - timedelta(days=(d.weekday() - dia_semana) % 7)
+
+
+def _observado(d):
+    """Feriado fijo que cae en fin de semana: se toma el viernes o el lunes."""
+    return d - timedelta(days=1) if d.weekday() == 5 else d + timedelta(days=1) if d.weekday() == 6 else d
+
+
+def feriados_eeuu(anio):
+    """Días en que no conviene escribir a un negocio chico de EEUU: {fecha: nombre}."""
+    accion = _n_esimo(anio, 11, 3, 4)
+    f = {
+        _observado(date(anio, 1, 1)): "Año Nuevo",
+        _n_esimo(anio, 5, 0, -1): "Memorial Day",
+        _observado(date(anio, 7, 4)): "Día de la Independencia",
+        _n_esimo(anio, 9, 0, 1): "Labor Day",
+        accion: "Thanksgiving",
+        accion + timedelta(days=1): "Black Friday",
+        date(anio, 12, 24): "Nochebuena",
+        _observado(date(anio, 12, 25)): "Navidad",
+        date(anio, 12, 31): "Fin de año",
+    }
+    return {d: n for d, n in f.items() if d.weekday() < 5}
+
+
+def motivo_no_habil(d):
+    if d.weekday() >= 5:
+        return "fin de semana"
+    return feriados_eeuu(d.year).get(d, "")
+
+
+def es_habil(d):
+    return not motivo_no_habil(d)
+
+
 def dias_habiles(desde, hasta):
-    """Días hábiles (lunes a viernes) entre dos fechas, sin contar la primera."""
+    """Días hábiles en EEUU entre dos fechas, sin contar la primera."""
     n, d = 0, desde
     while d < hasta:
         d += timedelta(days=1)
-        if d.weekday() < 5:
+        if es_habil(d):
             n += 1
     return n
 
@@ -75,6 +175,35 @@ def hoy():
     """Fecha de trabajo. Con RADAR_FECHA=AAAA-MM-DD se registra esa fecha (para preparar el envío de otro día)."""
     f = os.environ.get("RADAR_FECHA")
     return date.fromisoformat(f) if f else date.today()
+
+
+# ---------------------------------------------------------------------------
+# Armado -> enviado
+# ---------------------------------------------------------------------------
+def aplicar_envio(r, cuando):
+    """Pasa un mail armado a enviado, con la fecha en que salió."""
+    a = r.pop("armado")
+    tipo = a["tipo"]
+    if tipo == "primer mail":
+        r["estado"] = "enviado"
+        r["fechas"]["enviado"] = cuando
+    else:
+        r["estado"] = tipo
+        r["fechas"][tipo] = cuando
+
+
+def confirmar_armados(registro):
+    """Mientras no haya envío automático, lo armado un día se da por enviado ese día
+    (se confirma a partir del día siguiente). Devuelve cuántos confirmó."""
+    if not C.CONFIRMAR_AL_DIA_SIGUIENTE:
+        return 0
+    n, d = 0, hoy().isoformat()
+    for r in registro.values():
+        a = r.get("armado")
+        if a and a["fecha"] < d:
+            aplicar_envio(r, a["fecha"])
+            n += 1
+    return n
 
 
 def nombre_prolijo(nombre):
@@ -144,42 +273,205 @@ def verificar(api, place_ids):
 
 
 # ---------------------------------------------------------------------------
+# Horario de envío
+# ---------------------------------------------------------------------------
+_DESFASE_INVIERNO = {"America/New_York": -5, "America/Chicago": -6, "America/Los_Angeles": -8}
+
+
+def zona_ciudad(ciudad):
+    c = str(ciudad or "").lower()
+    for clave, z in C.ZONAS_CIUDAD.items():
+        if clave in c:
+            return z
+    return "America/New_York"
+
+
+def _a_utc(d, hora, minuto, zona):
+    if ZoneInfo:
+        return datetime(d.year, d.month, d.day, hora, minuto, tzinfo=ZoneInfo(zona)).astimezone(timezone.utc)
+    # Sin tzdata: se asume horario de invierno de EEUU (noviembre a marzo).
+    return datetime(d.year, d.month, d.day, hora, minuto, tzinfo=timezone.utc) - timedelta(hours=_DESFASE_INVIERNO.get(zona, -5))
+
+
+def _a_lucas(dt):
+    if ZoneInfo:
+        return dt.astimezone(ZoneInfo(C.ZONA_LUCAS))
+    return dt.astimezone(timezone(timedelta(hours=-3)))
+
+
+def asignar_horarios(items, d):
+    """Cada mail sale cerca de las 10 locales de su ciudad, escalonado y nunca en punto.
+    Agrega 'hora_art' (para programar en Gmail desde Argentina) y 'envio_utc'."""
+    azar = random.Random(f"{d.isoformat()}-{len(items)}")
+    por_zona = {}
+    for it in items:
+        por_zona.setdefault(zona_ciudad(it.get("ciudad")), []).append(it)
+    for zona, lista in por_zona.items():
+        t = _a_utc(d, C.HORA_LOCAL_ENVIO, 0, zona) + timedelta(minutes=azar.randint(2, 9))
+        for it in lista:
+            if _a_lucas(t).minute in (0, 30):                     # nunca en punto ni a la media
+                t += timedelta(minutes=1)
+            it["hora_art"] = _a_lucas(t).strftime("%H:%M")
+            it["envio_utc"] = t.isoformat()
+            t += timedelta(minutes=azar.randint(*C.SEPARACION_MIN))
+    return items
+
+
+# ---------------------------------------------------------------------------
 # Tanda
 # ---------------------------------------------------------------------------
 def seguimientos_pendientes(registro):
-    """Prospectos a los que hoy les toca un seguimiento."""
+    """Prospectos a los que hoy les toca un seguimiento (los que ya tienen un mail armado no)."""
     out, d = [], hoy()
     for email, r in registro.items():
-        if r.get("estado") not in ("enviado", "seguimiento 1"):
+        if r.get("estado") not in ("enviado", "seguimiento 1") or r.get("armado"):
             continue
         primero = date.fromisoformat(r["fechas"]["enviado"])
         transcurridos = dias_habiles(primero, d)
         if r["estado"] == "enviado" and transcurridos >= C.SEGUIMIENTO_DIAS[0]:
             out.append((email, 1))
         elif r["estado"] == "seguimiento 1" and transcurridos >= C.SEGUIMIENTO_DIAS[1]:
-            out.append((email, 2))
+            # Si el primer seguimiento salió tarde, el segundo espera igual su distancia mínima.
+            desde_seg1 = r["fechas"].get("seguimiento 1")
+            if not desde_seg1 or dias_habiles(date.fromisoformat(desde_seg1), d) >= C.SEGUIMIENTO_DIAS[1] - C.SEGUIMIENTO_DIAS[0]:
+                out.append((email, 2))
     out.sort(key=lambda x: registro[x[0]]["fechas"]["enviado"])
     return out
 
 
-def cmd_tanda(prueba=False, limite=None):
+def mails_de_hoy(registro, d):
+    """Mails que salen hoy: armados para hoy y enviados hoy. Rebotes y bajas no cuentan."""
+    out = set()
+    for e, r in registro.items():
+        if r.get("estado") == "descartado":
+            continue
+        if (r.get("armado") or {}).get("fecha") == d:
+            out.add(e)
+        elif any(v == d for k, v in r.get("fechas", {}).items() if k == "enviado" or k.startswith("seguimiento")):
+            out.add(e)
+    return out
+
+
+def evaluar(p, lugar, cuando, verificado):
+    """Arma el ítem de primer mail o devuelve el motivo para saltearlo."""
+    if lugar.get("permanentlyClosed") or lugar.get("temporarilyClosed"):
+        return None, "cerrado"
+    g = gancho(lugar, cuando)
+    if not g:
+        return None, "ya respondió sus reseñas"
+    muestra = len([r for r in (lugar.get("reviews") or [])
+                   if str(r.get("reviewOrigin") or "Google").lower() == "google"])
+    resenas = [{"autor": nombre_autor(g["gancho_autor"]), "estrellas": g["gancho_estrellas"],
+                "fecha": g["gancho_fecha"], "texto": g["gancho_texto"]}]
+    if g.get("gancho2_fecha"):
+        resenas.append({"autor": nombre_autor(g["gancho2_autor"]), "estrellas": g["gancho2_estrellas"],
+                        "fecha": g["gancho2_fecha"], "texto": g["gancho2_texto"]})
+    return {
+        "tipo": "primer mail", "email": p["email"].strip().lower(), "negocio": nombre_prolijo(p["nombre"]),
+        "negocio_original": p["nombre"], "rubro": p["rubro_nombre"],
+        "precio": C.PRECIO_RUBRO.get(rubro_clave(p["rubro_nombre"])),
+        "ciudad": p["ciudad_nombre"], "prioridad": p["prioridad"],
+        "sin_responder": g["sin_responder_muestra"], "de_las_ultimas": muestra,
+        "resenas": resenas, "en_espanol": es_espanol(" ".join(r["texto"] for r in resenas)),
+        "verificado": verificado, "place_id": p["place_id"], "maps": p.get("maps", ""),
+    }, ""
+
+
+def elegir_nuevos(cand, cupo, prueba, doms_usados):
+    """Recorre los candidatos en rondas (verificando con Apify) hasta llenar el cupo."""
+    nuevos, salteados, pos, rondas = [], [], 0, 0
+    guardados = None
+    api = None
+    probados = servidos = 0
+    while len(nuevos) < cupo and pos < len(cand):
+        faltan = cupo - len(nuevos)
+        # Cuántos verificar: según cuántos sirvieron hasta ahora (al principio se asume 3 de cada 4).
+        tasa = servidos / probados if probados else 0.75
+        tamanio = min(200, int(faltan / max(tasa, 0.1) * 1.2) + 3)
+        lote = cand[pos:pos + tamanio]
+        pos += len(lote)
+        frescos = {}
+        if not prueba:
+            if rondas >= C.VERIFICAR_RONDAS:
+                print(f"  Se llegó al máximo de {C.VERIFICAR_RONDAS} verificaciones: la tanda queda con "
+                      f"{len(nuevos)} primeros mails de {cupo}.")
+                break
+            rondas += 1
+            ids = [p["place_id"] for p in lote if re.match(r"^(ChIJ|GhIJ)", p["place_id"])]
+            if ids:
+                api = api or Apify(token())
+                usado, maximo = api.credito()
+                costo = costo_verificacion(len(ids))
+                if usado is not None and maximo and maximo - usado < costo:
+                    sys.exit(f"No alcanza el crédito de Apify para verificar (hace falta USD {costo:.2f}).")
+                print(f"Verificando {len(ids)} negocios en Google Maps (ronda {rondas}, como máximo USD {costo:.2f})...")
+                frescos = verificar(api, ids)
+        ahora = datetime.now(timezone.utc)
+        for p in lote:
+            if len(nuevos) >= cupo:
+                break
+            probados += 1
+            de = dominio_empresa(p["email"])
+            if de and de in doms_usados:
+                salteados.append((p["nombre"], "otro negocio del mismo dominio ya está en la campaña"))
+                continue
+            pid = p["place_id"]
+            if pid in frescos:
+                lugar, cuando, verificado = frescos[pid], ahora, True
+            else:
+                if guardados is None:
+                    guardados = lugares_guardados()
+                if pid not in guardados:
+                    salteados.append((p["nombre"], "sin datos del negocio"))
+                    continue
+                (lugar, cuando), verificado = guardados[pid], False
+                if not prueba:
+                    salteados.append((p["nombre"], "Google Maps no lo devolvió al verificar"))
+                    continue
+            it, motivo = evaluar(p, lugar, cuando, verificado)
+            if not it:
+                salteados.append((p["nombre"], motivo))
+                continue
+            nuevos.append(it)
+            servidos += 1
+            if de:
+                doms_usados.add(de)
+    return nuevos, salteados
+
+
+def archivo_tanda(d, prueba):
+    if prueba:
+        return TANDAS / f"tanda_{d}_prueba.json"
+    archivo = TANDAS / f"tanda_{d}.json"
+    n = 1
+    while archivo.exists():                                         # tanda completada el mismo día: no pisar la anterior
+        archivo = TANDAS / f"tanda_{d}_completar{'' if n == 1 else n}.json"
+        n += 1
+    return archivo
+
+
+def cmd_tanda(prueba=False, limite=None, forzar=False):
     limite = limite or C.ENVIOS_POR_DIA
-    registro = leer_json(REGISTRO, {})
-    bajas = set(leer_json(BAJAS, []))
+    dia = hoy()
+    d = dia.isoformat()
+    motivo = motivo_no_habil(dia)
+    if motivo and not forzar:
+        sys.exit(f"El {d} no es día hábil en EEUU ({motivo}): no se arma tanda. "
+                 f"Si igual querés armarla: py campana.py tanda --forzar")
+    registro = leer_registro()
+    bajas = leer_bajas()
+    confirmar_armados(registro)
     doms = dominios_bloqueados(bajas)
-    d = hoy().isoformat()
-    ya_hoy = [e for e, r in registro.items()
-              if r.get("estado") != "descartado" and any(
-                  v == d for k, v in r.get("fechas", {}).items()
-                  if k == "enviado" or k.startswith("seguimiento"))]
+    ya_hoy = mails_de_hoy(registro, d)
     if ya_hoy and not prueba:
         limite -= len(ya_hoy)
         if limite <= 0:
-            sys.exit(f"Ya se armó la tanda de hoy ({len(ya_hoy)} mails). La próxima, mañana.")
+            sys.exit(f"Ya se armó la tanda de hoy ({len(ya_hoy)} mails). La próxima, el próximo día hábil.")
         print(f"Hoy ya hay {len(ya_hoy)} mails armados: se arman {limite} más para completar el cupo.")
 
     # 1) Seguimientos primero: son los que ya están en conversación.
-    segs = [(e, n) for e, n in seguimientos_pendientes(registro) if not esta_bloqueado(e, bajas, doms)][:limite]
+    todos_segs = [(e, n) for e, n in seguimientos_pendientes(registro) if not esta_bloqueado(e, bajas, doms)]
+    segs = todos_segs[:limite]
     items = []
     for email, n in segs:
         r = registro[email]
@@ -192,85 +484,42 @@ def cmd_tanda(prueba=False, limite=None):
     nuevos, salteados = [], []
     if cupo > 0:
         contactados = set(registro) | bajas
-        cand = [p for p in cargar_prospectos()
-                if p["email"].lower() not in contactados and dominio(p["email"]) not in doms]
+        doms_usados = set(doms) | {dominio_empresa(e) for e, r in registro.items()
+                                   if r.get("estado") != "descartado"} - {""}
+        cand = [p for p in cargar_prospectos() if p["email"].strip().lower() not in contactados]
         cand = intercalar_rubros(cand)
-        # Se verifican algunos de más por si alguno ya respondió sus reseñas.
-        a_verificar = cand[:cupo + max(3, cupo // 4)]
-        guardados = lugares_guardados()
-        frescos = {}
-        if a_verificar and not prueba:
-            ids = [p["place_id"] for p in a_verificar if re.match(r"^(ChIJ|GhIJ)", p["place_id"])]
-            api = Apify(token())
-            usado, maximo = api.credito()
-            costo = costo_verificacion(len(ids))
-            if usado is not None and maximo and maximo - usado < costo:
-                sys.exit(f"No alcanza el crédito de Apify para verificar (hace falta USD {costo:.2f}).")
-            print(f"Verificando {len(ids)} negocios en Google Maps (como máximo USD {costo:.2f})...")
-            frescos = verificar(api, ids)
-        ahora = datetime.now(timezone.utc)
-        for p in a_verificar:
-            if len(nuevos) >= cupo:
-                break
-            pid = p["place_id"]
-            if pid in frescos:
-                lugar, cuando, verificado = frescos[pid], ahora, True
-            elif pid in guardados:
-                lugar, cuando = guardados[pid]
-                verificado = False
-            else:
-                salteados.append((p["nombre"], "sin datos del negocio"))
-                continue
-            if lugar.get("permanentlyClosed") or lugar.get("temporarilyClosed"):
-                salteados.append((p["nombre"], "cerrado"))
-                continue
-            g = gancho(lugar, cuando)
-            if not g:
-                salteados.append((p["nombre"], "ya respondió sus reseñas"))
-                continue
-            muestra = len([r for r in (lugar.get("reviews") or [])
-                           if str(r.get("reviewOrigin") or "Google").lower() == "google"])
-            textos = " ".join(str(r.get("text") or "") for r in (lugar.get("reviews") or []))
-            resenas = [{"autor": nombre_autor(g["gancho_autor"]), "estrellas": g["gancho_estrellas"],
-                        "fecha": g["gancho_fecha"], "texto": g["gancho_texto"]}]
-            if g.get("gancho2_fecha"):
-                resenas.append({"autor": nombre_autor(g["gancho2_autor"]), "estrellas": g["gancho2_estrellas"],
-                                "fecha": g["gancho2_fecha"], "texto": g["gancho2_texto"]})
-            nuevos.append({
-                "tipo": "primer mail", "email": p["email"], "negocio": nombre_prolijo(p["nombre"]),
-                "negocio_original": p["nombre"], "rubro": p["rubro_nombre"],
-                "precio": C.PRECIO_RUBRO.get(rubro_clave(p["rubro_nombre"])),
-                "ciudad": p["ciudad_nombre"], "prioridad": p["prioridad"],
-                "sin_responder": g["sin_responder_muestra"], "de_las_ultimas": muestra,
-                "resenas": resenas, "en_espanol": es_espanol(textos), "verificado": verificado,
-                "place_id": pid, "maps": p.get("maps", ""),
-            })
+        nuevos, salteados = elegir_nuevos(cand, cupo, prueba, doms_usados)
     items += nuevos
+    asignar_horarios(items, dia)
 
     tanda = {"fecha": d, "prueba": prueba, "items": items,
              "salteados": [{"negocio": n, "motivo": m} for n, m in salteados]}
     TANDAS.mkdir(parents=True, exist_ok=True)
-    archivo = TANDAS / f"tanda_{d}{'_prueba' if prueba else ''}.json"
-    if archivo.exists() and not prueba:                              # tanda completada el mismo día: no pisar la anterior
-        archivo = TANDAS / f"tanda_{d}_completar.json"
+    archivo = archivo_tanda(d, prueba)
     guardar_json(archivo, tanda)
 
     if not prueba:
         for it in nuevos:
-            registro[it["email"].lower()] = {
+            registro[it["email"]] = {
                 "negocio": it["negocio"], "rubro": it["rubro"], "precio": it["precio"],
                 "ciudad": it["ciudad"], "place_id": it["place_id"], "prioridad": it.get("prioridad", ""),
                 "asunto": f"{it['negocio']}'s Google reviews",
-                "estado": "enviado", "fechas": {"enviado": d},
+                "estado": "armado", "fechas": {"armado": d},
+                "armado": {"tipo": "primer mail", "fecha": d, "envio_utc": it["envio_utc"]},
             }
-        for email, n in segs:
-            registro[email]["estado"] = f"seguimiento {n}"
-            registro[email]["fechas"][f"seguimiento {n}"] = d
-        guardar_json(REGISTRO, registro)
+        for it in items:
+            if it["tipo"] != "primer mail":
+                registro[it["email"]]["armado"] = {"tipo": it["tipo"], "fecha": d, "envio_utc": it["envio_utc"]}
+        guardar_seguro(REGISTRO, registro)
 
-    print(f"\nTanda de {d}{' (prueba)' if prueba else ''}: {len(nuevos)} primeros mails + {len(segs)} seguimientos")
+    print(f"\nTanda de {d}{' (prueba)' if prueba else ''}: {len(nuevos)} primeros mails + {len(segs)} seguimientos"
+          f" = {len(items)} de {limite}")
+    if len(todos_segs) > len(segs):
+        print(f"  Quedan {len(todos_segs) - len(segs)} seguimientos para el próximo día hábil (no entraron en el cupo).")
     for n, m in salteados:
         print(f"  salteado: {n} ({m})")
+    for it in items:
+        print(f"  {it['hora_art']}  {it['tipo']:<14} {it['negocio']} ({it['ciudad']})")
     print(f"Archivo: {archivo}")
     print("Avisale a Claude que la tanda está lista para escribir los mails.")
     return tanda
@@ -313,39 +562,70 @@ def rubro_clave(nombre):
 # ---------------------------------------------------------------------------
 def cmd_marcar(email, estado):
     email = email.strip().lower()
-    registro = leer_json(REGISTRO, {})
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}", email):
+        sys.exit(f"'{email}' no parece un mail. Revisalo.")
+    registro = leer_registro()
+    confirmar_armados(registro)
     if estado == "baja":
-        bajas = leer_json(BAJAS, [])
-        if email not in bajas:
+        bajas = leer_estricto(BAJAS, [], list)
+        if email not in [str(b).lower() for b in bajas]:
             bajas.append(email)
-            guardar_json(BAJAS, bajas)
-    if email in registro:
-        registro[email]["estado"] = estado
-        registro[email]["fechas"][estado] = hoy().isoformat()
-        guardar_json(REGISTRO, registro)
-    elif estado != "baja":
-        sys.exit(f"{email} no está en el registro.")
-    print(f"{email}: {estado}.")
+            guardar_seguro(BAJAS, bajas)
+    if email not in registro:
+        if estado != "baja":
+            sys.exit(f"{email} no está en el registro.")
+        print(f"{email}: baja (no estaba en el registro; igual queda bloqueado).")
+        return
+    r = registro[email]
+    a = r.get("armado")
+    if estado == "enviado":
+        if not a:
+            sys.exit(f"{email} no tiene ningún mail armado.")
+        aplicar_envio(r, hoy().isoformat())
+        print(f"{email}: {r['estado']} ({hoy().isoformat()}).")
+    elif estado == "descartado" and a and a["tipo"] != "primer mail":
+        r.pop("armado")
+        print(f"{email}: se canceló el {a['tipo']} armado para el {a['fecha']}. Queda para el próximo día hábil.")
+    else:
+        if a:
+            r.pop("armado")
+            if estado != "descartado":
+                print(f"  OJO: tenía un {a['tipo']} armado para el {a['fecha']}. Si está programado en Gmail, desprogramalo.")
+        r["estado"] = estado
+        r["fechas"][estado] = hoy().isoformat()
+        print(f"{email}: {estado}.")
+    guardar_seguro(REGISTRO, registro)
+
+
+def registro_vigente():
+    """Registro para mirar (sin guardar): con los armados viejos ya confirmados y sin descartados."""
+    registro = leer_registro()
+    confirmar_armados(registro)
+    return {k: v for k, v in registro.items() if v.get("estado") != "descartado"}
 
 
 def cmd_estado():
-    registro = {k: v for k, v in leer_json(REGISTRO, {}).items() if v.get("estado") != "descartado"}
-    bajas = leer_json(BAJAS, [])
+    registro = registro_vigente()
+    bajas = leer_bajas()
     cuenta = {}
     for r in registro.values():
         cuenta[r["estado"]] = cuenta.get(r["estado"], 0) + 1
+    armados = sum(1 for r in registro.values() if r.get("armado"))
     total = len(cargar_prospectos()) if PROSPECTOS.exists() else 0
-    print(f"Prospectos en la lista: {total} | contactados: {len(registro)} | bajas: {len(bajas)}")
+    enviados = len([r for r in registro.values() if r["estado"] != "armado"])
+    print(f"Prospectos en la lista: {total} | contactados: {enviados} | bajas: {len(bajas)}")
     for e, n in sorted(cuenta.items()):
         print(f"  {e}: {n}")
+    if armados:
+        print(f"Mails armados esperando salir: {armados}")
     resp = cuenta.get("respondió", 0)
-    if registro:
-        print(f"Tasa de respuesta: {100 * resp / len(registro):.1f}%")
+    if enviados:
+        print(f"Tasa de respuesta: {100 * resp / enviados:.1f}%")
 
 
 def cmd_metricas():
     """Envíos, respuestas y tasa por rubro, ciudad y prioridad. Con pocos envíos los números son ruido."""
-    registro = {k: v for k, v in leer_json(REGISTRO, {}).items() if v.get("estado") != "descartado"}
+    registro = {k: v for k, v in registro_vigente().items() if v.get("estado") != "armado"}
     if not registro:
         print("Todavía no hay envíos registrados.")
         return
@@ -410,31 +690,24 @@ def sync_despues(mensaje):
         print("Registro subido a GitHub.")
 
 
+MARCAS = {"respondio": "respondió", "respondió": "respondió", "baja": "baja", "rebote": "rebotó",
+          "rebotó": "rebotó", "descartar": "descartado", "descartado": "descartado", "enviado": "enviado"}
+
+
 def main():
     args = sys.argv[1:]
     cmd = args[0] if args else ""
     try:
         if cmd == "tanda":
+            prueba = "--prueba" in args
             sync_antes()
-            cmd_tanda(prueba="--prueba" in args)
-            if "--prueba" not in args:
+            cmd_tanda(prueba=prueba, forzar="--forzar" in args)
+            if not prueba:
                 sync_despues(f"Tanda {hoy().isoformat()}")
-        elif cmd in ("respondio", "respondió") and len(args) > 1:
+        elif cmd in MARCAS and len(args) > 1:
             sync_antes()
-            cmd_marcar(args[1], "respondió")
-            sync_despues(f"Respondió {args[1]}")
-        elif cmd == "baja" and len(args) > 1:
-            sync_antes()
-            cmd_marcar(args[1], "baja")
-            sync_despues(f"Baja {args[1]}")
-        elif cmd in ("descartar", "descartado") and len(args) > 1:
-            sync_antes()
-            cmd_marcar(args[1], "descartado")
-            sync_despues(f"Descartado {args[1]}")
-        elif cmd in ("rebote", "rebotó") and len(args) > 1:
-            sync_antes()
-            cmd_marcar(args[1], "rebotó")
-            sync_despues(f"Rebote {args[1]}")
+            cmd_marcar(args[1], MARCAS[cmd])
+            sync_despues(f"{MARCAS[cmd].capitalize()} {args[1]}")
         elif cmd == "estado":
             sync_antes()
             cmd_estado()
