@@ -5,6 +5,8 @@ Uso (desde esta carpeta):
     py prospectar.py buscar            revisa zonas que faltan con Apify, hasta donde alcance el crédito
     py prospectar.py buscar --max 10   como mucho 10 zonas
     py prospectar.py buscar --si       sin preguntar antes de arrancar (lo usa la nube)
+    py prospectar.py buscar --forzar   busca aunque el stock ya alcance (normalmente busca solo lo que falta
+                                       para PROSP_STOCK_OBJETIVO A sin contactar y sin vencer)
     py prospectar.py lista             busca los mails y arma la lista de prospectos (gratis, se puede repetir)
     py prospectar.py migrar            pasa los datos viejos de datos/ a prospectos/prospeccion/ (una sola vez)
 
@@ -14,6 +16,7 @@ PROSP_RESERVA_USD sin tocar para las tandas. Después de cada zona sube el avanc
 La lista guarda solo las prioridades de PROSP_PRIORIDADES (hoy, solo A).
 """
 
+import math
 import re
 import subprocess
 import sys
@@ -212,10 +215,48 @@ def cmd_estimar(cuentas=None):
     return pendientes, n, estado
 
 
-def cmd_buscar(confirmar=True, max_zonas=None):
+def stock_disponible():
+    """A sin contactar y sin vencer en la lista actual (lo mismo que cuenta la campaña)."""
+    import campana as K
+    import control as X
+    csv_lista = SALIDA / "prospectos_todos.csv"
+    if not csv_lista.exists():
+        return 0
+    registro = leer_json(SALIDA / "campana" / "registro.json", {})
+    bajas = {str(e).strip().lower() for e in leer_json(SALIDA / "campana" / "bajas.json", [])}
+    return X.stock(registro, bajas, K.cargar_prospectos(ruta=csv_lista)).get("A", 0)
+
+
+def a_por_zona():
+    """A por zona medidos en la prospección (rendimiento.json); si no hay datos, PROSP_A_POR_ZONA."""
+    rend = leer_json(RENDIMIENTO, {})
+    zonas = sum(r.get("zonas", 0) for r in rend.values())
+    a = sum(r.get("a", 0) for r in rend.values())
+    return a / zonas if zonas >= 5 and a else C.PROSP_A_POR_ZONA
+
+
+def zonas_necesarias(stock, por_zona):
+    """Zonas para llegar al stock objetivo (0 si ya alcanza)."""
+    falta = C.PROSP_STOCK_OBJETIVO - stock
+    return 0 if falta <= 0 else max(1, math.ceil(falta / max(por_zona, 0.5)))
+
+
+def cmd_buscar(confirmar=True, max_zonas=None, forzar=False):
     """Revisa zonas una tras otra hasta que se termine el crédito (dejando la reserva para las tandas),
-    se llegue a max_zonas o no queden zonas. Usa todas las cuentas de Apify, en orden."""
+    se llegue a max_zonas o no queden zonas. Usa todas las cuentas de Apify, en orden.
+    Salvo con forzar, busca solo las zonas que faltan para llegar a PROSP_STOCK_OBJETIVO."""
     traer()
+    if not forzar:
+        stock, por_zona = stock_disponible(), a_por_zona()
+        necesarias = zonas_necesarias(stock, por_zona)
+        print(f"Stock: {stock} A sin contactar y sin vencer (objetivo {C.PROSP_STOCK_OBJETIVO}, "
+              f"unos {por_zona:.1f} A por zona).")
+        if necesarias == 0:
+            print("Alcanza: no busco zonas para no gastar crédito ni juntar prospectos que se vencen. "
+                  "(Para buscar igual: py prospectar.py buscar --forzar)")
+            return 0
+        max_zonas = necesarias if max_zonas is None else min(max_zonas, necesarias)
+        print(f"Faltan: busco hasta {max_zonas} zonas.")
     cuentas = cuentas_apify()
     pendientes, n, estado = cmd_estimar(cuentas)
     if n is None:
@@ -361,6 +402,10 @@ def cargar_bloques():
         b = leer_json(p, {})
         if b.get("ciudad") in C.PROSP_ZONAS:
             bloques.append((b["ciudad"], b))
+    # El más nuevo primero: si un negocio aparece en dos bloques, queda el dato más fresco
+    # (importa para el vencimiento y para el gancho). Con la misma fecha, el orden de siempre.
+    bloques.sort(key=lambda cb: fecha(cb[1].get("fecha")) or datetime.min.replace(tzinfo=timezone.utc),
+                 reverse=True)
     return bloques
 
 
@@ -484,7 +529,7 @@ COLUMNAS = [
     "rating", "resenas_totales", "resenas_por_mes", "web", "telefono", "direccion", "maps",
     "detectado", "place_id",
     # Para personalizar y para ofrecer otros servicios (vacías si no se pudo ver la web):
-    "dueno", "dejo_de_responder", "promedio_reciente",
+    "datos_del", "dueno", "dejo_de_responder", "promedio_reciente",
     "web_movil", "web_https", "web_vieja", "anio_copyright", "reservas_online", "pedidos_online",
 ]
 
@@ -572,7 +617,9 @@ def cmd_lista():
         vistos.add(e)
         lugar = n.pop("_lugar")
         textos = " ".join(str(r.get("text") or "") for r in (lugar.get("reviews") or []))
-        n.update(gancho(lugar, n.pop("_ahora")))
+        ahora_bloque = n.pop("_ahora")
+        n["datos_del"] = ahora_bloque.date().isoformat()     # para el vencimiento (PROSP_VENCE_DIAS)
+        n.update(gancho(lugar, ahora_bloque))
         web = previos.get(n["dominio"]) or {} if n["dominio"] else {}
         s = web.get("senales") or {}
         reservas_maps = bool(lugar.get("bookingLinks") or lugar.get("reserveTableUrl")
@@ -643,7 +690,7 @@ def main():
                     maximo = int(args[args.index("--max") + 1])
                 except (IndexError, ValueError):
                     sys.exit("Uso: py prospectar.py buscar --max 10")
-            cmd_buscar(confirmar="--si" not in args, max_zonas=maximo)
+            cmd_buscar(confirmar="--si" not in args, max_zonas=maximo, forzar="--forzar" in args)
         elif cmd == "lista":
             traer()
             cmd_lista()

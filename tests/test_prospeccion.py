@@ -895,3 +895,83 @@ def test_revisar_de_nuevo_nunca_pierde_un_mail(monkeypatch):
     assert r["cae-x.com"]["email"] == "a@cae-x.com" and r["cae-x.com"]["v"] == 2
     assert not E.necesita_revision(r["cae-x.com"]) and "reintento" not in r["cae-x.com"]
     assert r["sin-x.com"]["email"] == "b@sin-x.com" and r["sin-x.com"]["senales"] == {"movil": True}
+
+
+# --- stock justo y vencimiento (Plan 1 + 3) ------------------------------------------------
+def _lista_con(tmp, filas, registro=None, bajas=None):
+    cols = ["prioridad", "email", "datos_del"]
+    with (P.SALIDA / "prospectos_todos.csv").open("w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        w.writerows(filas)
+    (P.SALIDA / "campana").mkdir(exist_ok=True)
+    P.guardar_json(P.SALIDA / "campana" / "registro.json", registro or {})
+    P.guardar_json(P.SALIDA / "campana" / "bajas.json", bajas or [])
+
+
+def _hoy(dias_atras=0):
+    return (datetime.now() - timedelta(days=dias_atras)).date().isoformat()
+
+
+class TestStockJusto:
+    def test_vencido(self):
+        import campana as K
+        assert K.vencido({"datos_del": _hoy(C.PROSP_VENCE_DIAS + 1)})
+        assert not K.vencido({"datos_del": _hoy(C.PROSP_VENCE_DIAS)})
+        assert not K.vencido({"datos_del": ""}) and not K.vencido({}) and not K.vencido({"datos_del": "x"})
+
+    def test_stock_cuenta_solo_a_sin_contactar_ni_vencer(self, buscar):
+        _lista_con(buscar, [
+            {"prioridad": "A", "email": "a@uno-x.com", "datos_del": _hoy(3)},
+            {"prioridad": "A", "email": "b@dos-x.com", "datos_del": _hoy(80)},      # vencido
+            {"prioridad": "A", "email": "c@tres-x.com", "datos_del": _hoy(3)},     # ya contactado
+            {"prioridad": "A", "email": "d@cuatro-x.com", "datos_del": ""},        # lista vieja: vigente
+            {"prioridad": "B", "email": "e@cinco-x.com", "datos_del": _hoy(3)},
+        ], registro={"c@tres-x.com": {"estado": "enviado"}})
+        assert P.stock_disponible() == 2
+
+    def test_zonas_necesarias(self, monkeypatch):
+        monkeypatch.setattr(P.C, "PROSP_STOCK_OBJETIVO", 100)
+        assert P.zonas_necesarias(120, 6) == 0 and P.zonas_necesarias(100, 6) == 0
+        assert P.zonas_necesarias(99, 6) == 1 and P.zonas_necesarias(40, 6) == 10
+        assert P.zonas_necesarias(0, 0) == 200                                # nunca divide por 0
+
+    def test_a_por_zona_usa_lo_medido(self, buscar):
+        assert P.a_por_zona() == C.PROSP_A_POR_ZONA
+        P.guardar_json(P.RENDIMIENTO, {"aa": {"zonas": 10, "a": 80}})
+        assert P.a_por_zona() == 8
+
+    def test_no_busca_si_el_stock_alcanza(self, buscar, monkeypatch):
+        api = ApifyFalso(libre=5)
+        con_cuentas(monkeypatch, t1=api)
+        monkeypatch.setattr(P.C, "PROSP_STOCK_OBJETIVO", 2)
+        _lista_con(buscar, [{"prioridad": "A", "email": f"x@n{i}-x.com", "datos_del": _hoy(1)} for i in range(3)])
+        assert P.cmd_buscar(confirmar=False) == 0 and api.arrancadas == []
+        assert P.cmd_buscar(confirmar=False, forzar=True) == 3                 # --forzar busca igual
+
+    def test_busca_solo_lo_que_falta(self, buscar, monkeypatch):
+        api = ApifyFalso(libre=5)
+        con_cuentas(monkeypatch, t1=api)
+        monkeypatch.setattr(P.C, "PROSP_STOCK_OBJETIVO", 10)
+        monkeypatch.setattr(P.C, "PROSP_A_POR_ZONA", 6)
+        _lista_con(buscar, [{"prioridad": "A", "email": f"x@n{i}-x.com", "datos_del": _hoy(1)} for i in range(5)])
+        assert P.cmd_buscar(confirmar=False) == 1                              # faltan 5: una zona
+        assert P.cmd_buscar(confirmar=False, max_zonas=0) == 0
+
+    def test_la_campana_no_usa_vencidos(self, buscar, monkeypatch):
+        import campana as K
+        _lista_con(buscar, [{"prioridad": "A", "email": "a@uno-x.com", "datos_del": _hoy(80)},
+                            {"prioridad": "A", "email": "b@dos-x.com", "datos_del": _hoy(2)}])
+        ruta = P.SALIDA / "prospectos_todos.csv"
+        assert [p["email"] for p in K.cargar_prospectos(ruta=ruta)] == ["b@dos-x.com"]
+        assert len(K.cargar_prospectos(incluir_vencidos=True, ruta=ruta)) == 2
+
+
+def test_el_dato_mas_nuevo_gana(tmp_path, monkeypatch):
+    usar_carpeta(monkeypatch, tmp_path)
+    monkeypatch.setattr(P.C, "PROSP_ZONAS", {"aa": ["a1", "a2"]})
+    (P.CRUDO).mkdir(parents=True, exist_ok=True)
+    P.guardar_json(P.CRUDO / "aa.json.gz", {"fecha": hace(60), "items": [{"title": "viejo"}]})
+    P.guardar_json(P.archivo_zona("aa", "a1"), {"ciudad": "aa", "zona": "a1", "fecha": hace(1), "items": []})
+    P.guardar_json(P.archivo_zona("aa", "a2"), {"ciudad": "aa", "zona": "a2", "fecha": hace(30), "items": []})
+    assert [b.get("zona") for _, b in P.cargar_bloques()] == ["a1", "a2", "estudio"]

@@ -184,14 +184,14 @@ def _tras(r):
     return "tras primer mail"
 
 
-def stock(registro, bajas):
-    """Prospectos de la lista que todavía no se contactaron, por prioridad."""
-    if not K.PROSPECTOS.exists():
+def stock(registro, bajas, prospectos=None):
+    """Prospectos de la lista (sin vencer) que todavía no se contactaron, por prioridad."""
+    if prospectos is None and not K.PROSPECTOS.exists():
         return {}
     usados = set(registro) | {str(b).lower() for b in bajas}
     doms = K.dominios_bloqueados(bajas) | {K.dominio_empresa(e) for e in registro} - {""}
     out = {"A": 0, "B": 0, "C": 0}
-    for p in K.cargar_prospectos():
+    for p in (prospectos if prospectos is not None else K.cargar_prospectos()):
         e = p["email"].strip().lower()
         if e in usados or (K.dominio_empresa(e) and K.dominio_empresa(e) in doms):
             continue

@@ -235,11 +235,26 @@ def nombre_prolijo(nombre):
     return re.sub(r"\s+", " ", s).strip(" ,.-")
 
 
-def cargar_prospectos():
-    if not PROSPECTOS.exists():
+def vencido(p, hoy=None):
+    """Los datos del negocio (columna datos_del) tienen más de PROSP_VENCE_DIAS: no se usa.
+    Sin esa columna (listas viejas), cuenta como vigente."""
+    d = str(p.get("datos_del") or "")[:10]
+    if not d:
+        return False
+    try:
+        bajado = datetime.strptime(d, "%Y-%m-%d").date()
+    except ValueError:
+        return False
+    return ((hoy or datetime.now().date()) - bajado).days > C.PROSP_VENCE_DIAS
+
+
+def cargar_prospectos(incluir_vencidos=False, ruta=None):
+    ruta = ruta or PROSPECTOS
+    if not ruta.exists():
         sys.exit("No hay lista de prospectos. Corré primero: py prospectar.py lista")
-    with PROSPECTOS.open(encoding="utf-8-sig") as f:
-        return list(csv.DictReader(f))
+    with ruta.open(encoding="utf-8-sig") as f:
+        filas = list(csv.DictReader(f))
+    return filas if incluir_vencidos else [p for p in filas if not vencido(p)]
 
 
 def lugares_guardados():
