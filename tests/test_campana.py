@@ -280,12 +280,11 @@ def test_armado_no_cuenta_como_enviado_hasta_confirmar(camp, monkeypatch):
 def test_sin_confirmacion_automatica_espera_al_envio(camp, monkeypatch):
     monkeypatch.setattr(camp.C, "CONFIRMAR_AL_DIA_SIGUIENTE", False)
     t = tanda(camp, monkeypatch, "2026-11-30", limite=3)
-    monkeypatch.setenv("RADAR_FECHA", "2026-12-02")
+    e = t["items"][0]["email"]
+    camp.cmd_marcar(e, "enviado")                                    # lo marca el envío automático
     r = reg(camp)
-    camp.confirmar_armados(r)
-    assert all(v["estado"] == "armado" for v in r.values())
-    camp.cmd_marcar(t["items"][0]["email"], "enviado")
-    assert reg(camp)[t["items"][0]["email"]]["fechas"]["enviado"] == "2026-12-02"
+    assert r[e]["estado"] == "enviado" and r[e]["fechas"]["enviado"] == "2026-11-30"
+    assert sum(1 for v in r.values() if v["estado"] == "armado") == 2
 
 
 def test_dos_corridas_el_mismo_dia_no_pasan_el_tope(camp, monkeypatch):

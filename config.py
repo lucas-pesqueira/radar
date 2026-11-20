@@ -344,6 +344,6 @@ ZONA_LUCAS = "America/Argentina/Buenos_Aires"
 HORA_LOCAL_ENVIO = 10            # primer mail de cada ciudad a esta hora local
 SEPARACION_MIN = (11, 17)        # minutos entre un mail y el siguiente de la misma ciudad (al azar)
 
-# Hasta que exista el envío automático, una tanda armada se da por enviada al día siguiente.
-# Con el envío automático en marcha se pasa a False: lo marca el script de envío al mandar.
-CONFIRMAR_AL_DIA_SIGUIENTE = True
+# False: los mails los manda enviar.py (GitHub Actions) y los marca como enviados al mandarlos.
+# True solo si se vuelve a programar a mano en Gmail: lo armado se da por enviado al día siguiente.
+CONFIRMAR_AL_DIA_SIGUIENTE = False

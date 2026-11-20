@@ -193,16 +193,26 @@ def aplicar_envio(r, cuando):
 
 
 def confirmar_armados(registro):
-    """Mientras no haya envío automático, lo armado un día se da por enviado ese día
-    (se confirma a partir del día siguiente). Devuelve cuántos confirmó."""
-    if not C.CONFIRMAR_AL_DIA_SIGUIENTE:
-        return 0
+    """Mails armados en días anteriores que siguen como armados.
+    - Sin envío automático (CONFIRMAR_AL_DIA_SIGUIENTE): se dan por enviados el día en que se armaron.
+    - Con envío automático: si no salieron es porque no había borrador (no se aprobó). El primer mail
+      se borra del registro (el negocio vuelve a estar disponible) y el seguimiento queda para otro día.
+    Devuelve cuántos tocó."""
     n, d = 0, hoy().isoformat()
-    for r in registro.values():
+    for email in list(registro):
+        r = registro[email]
         a = r.get("armado")
-        if a and a["fecha"] < d:
+        if not a or a["fecha"] >= d:
+            continue
+        n += 1
+        if C.CONFIRMAR_AL_DIA_SIGUIENTE:
             aplicar_envio(r, a["fecha"])
-            n += 1
+        elif a["tipo"] == "primer mail":
+            del registro[email]
+            print(f"  {email}: el primer mail del {a['fecha']} no salió; vuelve a la lista de prospectos.")
+        else:
+            r.pop("armado")
+            print(f"  {email}: el {a['tipo']} del {a['fecha']} no salió; queda para el próximo día hábil.")
     return n
 
 
