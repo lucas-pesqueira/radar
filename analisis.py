@@ -48,6 +48,12 @@ def _host_termina(host, sufijo):
     return host == sufijo or host.endswith("." + sufijo)
 
 
+# Sufijos de dos partes: en "pizzeria.com.mx" el dominio es "pizzeria.com.mx", no "com.mx"
+# (si no, todos los negocios con esa terminación parecerían una misma cadena).
+SUFIJOS_DOBLES = {"co.uk", "org.uk", "com.au", "com.mx", "com.ar", "com.br", "co.nz", "co.za", "com.co",
+                  "co.jp", "com.sg", "com.hk", "co.in", "com.tr", "com.cn", "com.pe", "com.ve", "com.ec"}
+
+
 def analizar_web(url):
     """Devuelve (tipo, clave): tipo es 'sin_web', 'red_social' o 'propia'."""
     if not url or not str(url).strip():
@@ -61,15 +67,17 @@ def analizar_web(url):
         host = host[4:]
     if not host:
         return "sin_web", None
-    if any(_host_termina(host, h) for h in C.HOSTS_NO_WEB):
-        return "red_social", None
+    # Primero los constructores: sites.google.com termina en google.com pero es una web propia.
     if any(_host_termina(host, h) for h in C.HOSTS_CONSTRUCTOR):
         if host == "sites.google.com":
             seg = [x for x in p.path.split("/") if x]
             return "propia", host + "/" + "/".join(seg[:2])
         return "propia", host
+    if any(_host_termina(host, h) for h in C.HOSTS_NO_WEB):
+        return "red_social", None
     partes = host.split(".")
-    return "propia", ".".join(partes[-2:]) if len(partes) >= 2 else host
+    n = 3 if len(partes) >= 3 and ".".join(partes[-2:]) in SUFIJOS_DOBLES else 2
+    return "propia", ".".join(partes[-n:]) if len(partes) >= 2 else host
 
 
 # ---------------------------------------------------------------------------
@@ -88,10 +96,13 @@ def categoria_valida(lugar, rubro):
     return any(k in c for c in cats for k in r["categorias"])
 
 
-def es_marca_cadena(titulo, dominio=None):
+def es_marca_cadena(titulo, dominio=None, rubro=None):
+    """La marca de cadena que aparece en el nombre o en la web. Con rubro, solo se buscan las
+    marcas de ese rubro (más las generales); sin rubro, todas."""
     t = norm(titulo)
     d = re.sub(r"[^a-z0-9]", "", (dominio or "").split(".")[0]) if dominio else ""
-    for m in C.MARCAS_CADENA:
+    marcas = (C.MARCAS_POR_RUBRO.get(rubro, []) + C.MARCAS_GENERALES) if rubro else C.MARCAS_CADENA
+    for m in marcas:
         m = norm(m)
         if re.search(r"(^|[^a-z0-9])" + re.escape(m) + r"($|[^a-z0-9])", t):
             return m
@@ -113,8 +124,11 @@ def web_de_sucursales(url):
     u = str(url or "")
     p = urlparse(u if re.match(r"^https?://", u, re.I) else "http://" + u)
     seg = [x for x in p.path.lower().split("/") if x]
-    if any("location" in x or x in ("branches", "offices") for x in seg):
-        return True
+    # /locations/atlanta-midtown o /branches/... = una sucursal. Una sola página /location o
+    # /contact-location la tienen también los negocios de un solo local: eso no es cadena.
+    for i, x in enumerate(seg[:-1]):
+        if ("location" in x or x in ("branches", "offices", "stores")) and seg[i + 1] not in ("", "index.html"):
+            return True
     ambiguos = {"in", "me", "or", "de", "hi", "ok", "id", "oh", "la", "co", "pa", "ma", "al"}
     comunes = {"about", "contact", "services", "service", "blog", "home", "menu", "team", "news"}
     return (len(seg) >= 2 and seg[0] in ESTADOS_US - ambiguos
@@ -264,7 +278,7 @@ def construir_negocios(crudo, emails=None, con_lugar=False):
         elif f["tipo_web"] == "propia" and web_de_sucursales(l.get("website")):
             motivo = "web de una empresa con sucursales"
         else:
-            marca = es_marca_cadena(l.get("title"), d)
+            marca = es_marca_cadena(l.get("title"), d, f["rubro"])
             if marca:
                 motivo = f"marca conocida ({marca})"
 

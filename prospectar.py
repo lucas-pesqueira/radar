@@ -145,6 +145,8 @@ def cmd_buscar(confirmar=True):
     if n == 0 and not en_curso:
         return
     usado, maximo = api.credito()
+    if usado is None or not maximo:
+        sys.exit("No se pudo leer tu crédito de Apify. Probá de nuevo en un rato.")
     libre_inicial = maximo - usado
     print(f"\nVoy a revisar zonas hasta que se termine el crédito (USD {libre_inicial:.2f} disponibles; "
           f"cada zona cuesta entre USD 0,50 y {costo_zona():.2f}).")
@@ -316,7 +318,10 @@ def relacionado(email, nombre, web):
     host = (re.sub(r"^https?://(www\.)?", "", str(web or "").lower()).split("/")[0]).rsplit(".", 1)[0]
     palabras |= set(re.findall(r"[a-z0-9]{4,}", host))
     genericas = {"the", "and", "inc", "llc", "restaurant", "bar", "grill", "nail", "nails", "spa",
-                 "moving", "movers", "property", "management", "realty", "group", "services", "salon"}
+                 "moving", "movers", "property", "management", "realty", "group", "services", "salon",
+                 "kitchen", "cafe", "best", "home", "homes", "city", "usa", "company", "studio",
+                 # ciudades: "atlantawebdesign.com" no tiene que ver con un negocio de Atlanta
+                 "atlanta", "houston", "los", "angeles", "kansas", "texas", "georgia", "california"}
     return any(p in dom for p in palabras - genericas) or any(p in host for p in [dom] if len(dom) >= 4)
 
 
@@ -379,7 +384,8 @@ def cmd_lista():
     from emails import elegir
     for n in cand:
         r = previos.get(n["dominio"]) if n["dominio"] else None
-        todos = (r or {}).get("emails") or ([r["email"]] if r and r.get("email") else [])
+        # Se suma el mejor que se eligió al buscar: la lista guardada se corta en 10 mails.
+        todos = list((r or {}).get("emails") or []) + ([r["email"]] if r and r.get("email") else [])
         n["email"] = elegir(todos, n["dominio"])
     con_mail = [n for n in cand if n["email"]]
     for n in con_mail:

@@ -469,3 +469,22 @@ def test_orden_de_los_archivos_de_token(tmp_path, monkeypatch):
     assert estudio.tokens() == ["a", "b", "c", "j"]
     monkeypatch.setenv("APIFY_TOKEN", "x1\ny2, x1")
     assert estudio.tokens() == ["x1", "y2"]
+
+
+def test_tanda_saltea_mails_de_relleno(camp, monkeypatch):
+    """Un mail de relleno que haya quedado en la lista (example@mail.com) nunca se arma."""
+    import csv as _csv
+    filas = list(_csv.DictReader(camp.PROSPECTOS.open(encoding="utf-8-sig")))
+    filas[0]["email"] = "example@mail.com"
+    with camp.PROSPECTOS.open("w", encoding="utf-8-sig", newline="") as f:
+        w = _csv.DictWriter(f, fieldnames=list(filas[0]))
+        w.writeheader()
+        w.writerows(filas)
+    from emails import es_basura
+    monkeypatch.setattr("emails.es_basura", lambda e: False)          # sin el filtro, entra
+    antes = tanda(camp, monkeypatch, "2026-11-30", limite=20)
+    assert "example@mail.com" in {i["email"] for i in antes["items"]}
+    camp.REGISTRO.write_text("{}")
+    monkeypatch.setattr("emails.es_basura", es_basura)                # con el filtro, no
+    t = tanda(camp, monkeypatch, "2026-11-30", limite=20)
+    assert "example@mail.com" not in {i["email"] for i in t["items"]} and len(t["items"]) == 20

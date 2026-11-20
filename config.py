@@ -155,42 +155,48 @@ MIN_RESENAS_MES = 1.0
 # ---------------------------------------------------------------------------
 # Un dominio web compartido por varios negocios en ciudades distintas, o por 3 o más
 # negocios, se toma como cadena. Esta lista atrapa las marcas que aparecen una sola vez.
-MARCAS_CADENA = [
-    # mudanzas
-    "two men and a truck", "u-haul", "uhaul", "pods", "college hunks", "allied van lines",
-    "united van lines", "mayflower", "atlas van lines", "bekins", "north american van lines",
-    # plomería / hvac / electro / garajes
+# Marcas de cadenas, por rubro: una marca solo descarta negocios de su propio rubro
+# (así "Mayflower Seafood" no queda afuera por la mudanza Mayflower, ni "Rollins Realty" por la de plagas).
+_OFICIOS = [
     "roto-rooter", "mr. rooter", "mr rooter", "benjamin franklin plumbing", "ars rescue rooter",
     "one hour heating", "aire serv", "mr. appliance", "mr appliance", "sears home services",
     "precision garage door", "precision door", "overhead door", "a1 garage door",
-    "home depot", "lowe's", "lowes",
-    # plagas
-    "terminix", "orkin", "rentokil", "truly nolen", "aptive", "mosquito joe", "mosquito squad",
-    "arrow exterminators", "ehrlich", "western exterminator", "rollins",
-    # techos
-    "erie home",
-    # talleres y chapa
+]
+_TALLERES = [
     "firestone", "midas", "meineke", "pep boys", "jiffy lube", "valvoline", "goodyear",
     "christian brothers automotive", "monro", "mavis", "ntb", "tire kingdom", "discount tire",
     "caliber collision", "gerber collision", "service king", "crash champions", "maaco",
     "carstar", "fix auto", "take 5", "aamco", "big o tires", "les schwab", "brakes plus",
-    # administradoras
-    "greystar", "invitation homes", "progress residential", "real property management",
-    "mynd", "evernest", "american homes 4 rent", "tricon", "pathlight", "main street renewal",
-    # otras cadenas vistas en la muestra
-    "bellhop", "bellhops", "miniluxe", "einstein moving",
-    "sugarfish", "regency centers",
-    # hoteles (restaurantes dentro de hoteles)
-    "wyndham", "marriott", "hilton", "hyatt", "sheraton", "westin", "radisson",
-    "holiday inn", "best western", "la quinta", "embassy suites", "doubletree",
-    # restaurantes
-    "mcdonald's", "burger king", "wendy's", "taco bell", "chick-fil-a", "subway", "popeyes",
-    "kfc", "domino's", "pizza hut", "papa john's", "little caesars", "applebee's",
-    "chili's", "olive garden", "ihop", "denny's", "waffle house", "cracker barrel",
-    "texas roadhouse", "outback", "red lobster", "buffalo wild wings", "panda express",
-    "chipotle", "whataburger", "sonic drive-in", "jack in the box", "in-n-out",
-    "cheesecake factory", "p.f. chang", "red robin", "five guys", "panera", "starbucks",
 ]
+MARCAS_POR_RUBRO = {
+    "mudanzas": ["two men and a truck", "u-haul", "uhaul", "pods", "college hunks", "allied van lines",
+                 "united van lines", "mayflower", "atlas van lines", "bekins", "north american van lines",
+                 "bellhop", "bellhops", "einstein moving"],
+    "plomeros": _OFICIOS, "hvac": _OFICIOS, "electrodomesticos": _OFICIOS, "garajes": _OFICIOS,
+    "plagas": ["terminix", "orkin", "rentokil", "truly nolen", "aptive", "mosquito joe", "mosquito squad",
+               "arrow exterminators", "ehrlich", "western exterminator", "rollins"],
+    "techistas": ["erie home"],
+    "talleres": _TALLERES, "chapa": _TALLERES,
+    "administradoras": ["greystar", "invitation homes", "progress residential", "real property management",
+                        "mynd", "evernest", "american homes 4 rent", "tricon", "pathlight",
+                        "main street renewal", "regency centers"],
+    "unas": ["miniluxe"],
+    "restaurantes": [
+        # hoteles (restaurantes dentro de hoteles)
+        "wyndham", "marriott", "hilton", "hyatt", "sheraton", "westin", "radisson",
+        "holiday inn", "best western", "la quinta", "embassy suites", "doubletree",
+        # cadenas de comida
+        "mcdonald's", "burger king", "wendy's", "taco bell", "chick-fil-a", "subway", "popeyes",
+        "kfc", "domino's", "pizza hut", "papa john's", "little caesars", "applebee's",
+        "chili's", "olive garden", "ihop", "denny's", "waffle house", "cracker barrel",
+        "texas roadhouse", "outback", "red lobster", "buffalo wild wings", "panda express",
+        "chipotle", "whataburger", "sonic drive-in", "jack in the box", "in-n-out",
+        "cheesecake factory", "p.f. chang", "red robin", "five guys", "panera", "starbucks",
+        "sugarfish",
+    ],
+}
+MARCAS_GENERALES = ["home depot", "lowe's", "lowes"]          # valen para cualquier rubro
+MARCAS_CADENA = sorted({m for ms in MARCAS_POR_RUBRO.values() for m in ms} | set(MARCAS_GENERALES))
 
 # Sitios que no son una web propia (redes, directorios, mapas).
 HOSTS_NO_WEB = [

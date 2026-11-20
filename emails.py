@@ -24,9 +24,24 @@ DOMINIOS_BASURA = (
     "schema.org", "w3.org", "wix.com", "mysite.com", "company.com", "test.com",
 )
 LOCALES_BASURA = ("user", "name", "your", "youremail", "email", "info@example", "username",
-                  "johndoe", "john.doe", "firstname", "noreply", "no-reply", "donotreply")
-GRATUITOS = ("gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "aol.com", "icloud.com",
-             "live.com", "msn.com", "comcast.net", "att.net", "sbcglobal.net", "bellsouth.net")
+                  "johndoe", "john.doe", "firstname", "noreply", "no-reply", "donotreply",
+                  "me", "example", "test", "sample", "someone", "yourname", "you")
+GRATUITOS = ("gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "outlook.com", "hotmail.com", "aol.com",
+             "icloud.com", "me.com", "mac.com", "live.com", "msn.com", "proton.me", "protonmail.com", "comcast.net",
+             "att.net", "sbcglobal.net", "verizon.net", "cox.net", "bellsouth.net")
+
+
+def es_basura(email):
+    """Mails que no son de nadie: textos de relleno de las plantillas web (me@me.com, example@mail.com),
+    direcciones internas de Wix o de herramientas de errores (hash@sentry.wixpress.com)."""
+    e = str(email or "").strip().lower()
+    local, arroba, dom = e.partition("@")
+    if not arroba or not local or "." not in dom:
+        return True
+    return (local in LOCALES_BASURA or dom in DOMINIOS_BASURA
+            or any(dom.endswith("." + d) for d in DOMINIOS_BASURA)
+            or "sentry" in dom.split(".")
+            or bool(re.fullmatch(r"[0-9a-f]{20,}", local)))
 
 
 def _cf(hexa):
@@ -46,9 +61,9 @@ def extraer(html):
         e = e.strip(".-_").lower()
         if not e or "@" not in e:
             continue
-        local, _, dom = e.partition("@")
-        if e.endswith(EXT_FALSAS) or dom in DOMINIOS_BASURA or local in LOCALES_BASURA:
+        if e.endswith(EXT_FALSAS) or es_basura(e):
             continue
+        local, _, dom = e.partition("@")
         if re.search(r"\d+x\d*$", dom) or len(local) > 40:
             continue  # nombres de imágenes tipo logo@2x.png
         limpios.add(e)
@@ -72,6 +87,7 @@ def normalizar(m):
     if "@" not in m:
         return ""
     local, _, dom = m.partition("@")
+    local = re.sub(r"^(u00[0-9a-f]{2})+", "", local)             # \u003einfo (texto de JavaScript) -> info
     local = re.sub(r"^[\s\d().+-]{5,}", "", local).strip(".-_ ")   # 499-9324relocation -> relocation
     local = local.split()[-1] if local.split() else ""
     if not local or not re.fullmatch(r"[a-z0-9._%+-]+", local):
@@ -84,7 +100,7 @@ def elegir(mails, dominio):
     Descarta mails de áreas que no compran y deja los de administración para el final."""
     local = lambda m: m.split("@")[0].lower()
     mails = sorted({normalizar(m) for m in (mails or [])} - {""})
-    mails = [m for m in mails if local(m) not in ROLES_NO]
+    mails = [m for m in mails if local(m) not in ROLES_NO and not es_basura(m)]
     if not mails:
         return None
     buenos = [m for m in mails if local(m) not in ROLES_ULTIMO]
@@ -174,7 +190,9 @@ def tiene_mx(dominio, sesion=None):
         if d.get("Status") == 3:  # el dominio no existe
             return False
         if d.get("Status") == 0:
-            return any(a.get("type") == 15 for a in d.get("Answer", []))
+            mx = [str(a.get("data", "")).split() for a in d.get("Answer", []) if a.get("type") == 15]
+            # "0 ." es un MX nulo: el dominio declara que no recibe mails.
+            return any(len(x) >= 2 and x[1].rstrip(".") for x in mx) or any(len(x) == 1 for x in mx)
     return None
 
 

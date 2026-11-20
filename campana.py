@@ -58,7 +58,7 @@ BACKUPS = BASE / "datos" / "backups"   # fuera de los dos repos: copias locales 
 ORDEN_PRIORIDAD = {"A": 0, "B": 1, "C": 2}
 # Dominios de mail personal: una baja de alguien con gmail no bloquea a todo gmail.
 DOMINIOS_LIBRES = {"gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "hotmail.com", "outlook.com",
-                   "live.com", "msn.com", "aol.com", "icloud.com", "me.com", "proton.me", "protonmail.com",
+                   "live.com", "msn.com", "aol.com", "icloud.com", "me.com", "mac.com", "proton.me", "protonmail.com",
                    "comcast.net", "att.net", "sbcglobal.net", "verizon.net", "cox.net", "bellsouth.net"}
 TIPOS_ENVIO = ("primer mail", "seguimiento 1", "seguimiento 2")
 
@@ -565,7 +565,9 @@ def cmd_tanda(prueba=False, limite=None, forzar=False, auto=False):
         contactados = set(registro) | bajas
         doms_usados = set(doms) | {dominio_empresa(e) for e, r in registro.items()
                                    if r.get("estado") != "descartado"} - {""}
-        cand = [p for p in cargar_prospectos() if p["email"].strip().lower() not in contactados]
+        from emails import es_basura
+        cand = [p for p in cargar_prospectos() if p["email"].strip().lower() not in contactados
+                and not es_basura(p["email"])]                  # mails de relleno de las webs (example@mail.com)
         cand = intercalar_rubros(cand)
         nuevos, salteados = elegir_nuevos(cand, cupo, prueba, doms_usados)
     items += nuevos
