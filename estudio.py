@@ -9,6 +9,7 @@ Uso (desde esta carpeta):
 """
 
 import csv
+import gzip
 import html
 import json
 import os
@@ -38,16 +39,27 @@ RESULTADOS = BASE / "resultados"
 # Archivos
 # ---------------------------------------------------------------------------
 def leer_json(p, defecto):
+    """Lee un JSON (también comprimido, si termina en .gz). Si no existe o está roto, devuelve 'defecto'."""
     try:
+        if str(p).endswith(".gz"):
+            with gzip.open(p, "rt", encoding="utf-8") as f:
+                return json.load(f)
         return json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, EOFError):
         return defecto
 
 
 def guardar_json(p, datos):
+    """Guarda un JSON sin dejarlo a medio escribir. Si termina en .gz lo comprime (siempre igual
+    para los mismos datos, así git no ve cambios donde no los hay)."""
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(datos, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp = p.with_name(p.name + ".tmp")
+    if str(p).endswith(".gz"):
+        crudo = json.dumps(datos, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        with open(tmp, "wb") as f, gzip.GzipFile(filename="", fileobj=f, mode="wb", mtime=0) as g:
+            g.write(crudo)
+    else:
+        tmp.write_text(json.dumps(datos, ensure_ascii=False, indent=1), encoding="utf-8")
     tmp.replace(p)
 
 

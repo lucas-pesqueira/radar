@@ -19,3 +19,8 @@ def test_tanda_a_las_6_47():
     t = CJ.armar_tarea("Tinko - tanda", CJ.TAREAS["Tinko - tanda"], "x")
     assert t["url"].endswith("/tanda.yml/dispatches")
     assert (t["schedule"]["hours"], t["schedule"]["minutes"]) == ([6], [47])
+
+
+def test_prospeccion_los_domingos():
+    t = CJ.armar_tarea("Tinko - prospeccion", CJ.TAREAS["Tinko - prospeccion"], "x")
+    assert t["url"].endswith("/prospeccion.yml/dispatches") and t["schedule"]["wdays"] == [0]

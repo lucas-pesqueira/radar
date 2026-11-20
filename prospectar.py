@@ -1,15 +1,21 @@
 """Modo prospección: arma la lista de negocios para contactar por mail.
 
 Uso (desde esta carpeta):
-    py prospectar.py estimar   cuántas zonas alcanza a revisar tu crédito, sin gastar nada
-    py prospectar.py buscar    revisa las zonas que faltan con Apify, hasta donde alcance el crédito
-    py prospectar.py lista     busca los mails y arma la lista de prospectos (gratis, se puede repetir)
+    py prospectar.py estimar           cuántas zonas alcanza a revisar el crédito (todas las cuentas), sin gastar nada
+    py prospectar.py buscar            revisa zonas que faltan con Apify, hasta donde alcance el crédito
+    py prospectar.py buscar --max 10   como mucho 10 zonas
+    py prospectar.py buscar --si       sin preguntar antes de arrancar (lo usa la nube)
+    py prospectar.py lista             busca los mails y arma la lista de prospectos (gratis, se puede repetir)
+    py prospectar.py migrar            pasa los datos viejos de datos/ a prospectos/prospeccion/ (una sola vez)
 
-Se puede correr todos los meses: cada vez sigue con las zonas que faltan y la lista
-nueva trae solo los prospectos que no estaban en las anteriores.
+Los datos de la prospección viven en el repo privado (prospectos/prospeccion/, comprimidos), así la
+búsqueda corre también en GitHub (Action "prospeccion"). Usa todas las cuentas de Apify en orden y deja
+PROSP_RESERVA_USD sin tocar para las tandas. Después de cada zona sube el avance a GitHub.
+La lista guarda solo las prioridades de PROSP_PRIORIDADES (hoy, solo A).
 """
 
 import re
+import subprocess
 import sys
 import time
 import unicodedata
@@ -18,20 +24,23 @@ from pathlib import Path
 
 import config as C
 from analisis import construir_negocios, fecha, norm
-from apify import Apify, ErrorApify
-from estudio import (BASE, CRUDO, EMAILS, escribir_csv, guardar_json, leer_json, token)
+from apify import Apify, Cuentas, ErrorApify
+from estudio import (BASE, escribir_csv, guardar_json, leer_json, token, tokens)
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 except (AttributeError, ValueError):
     pass
 
-DIR = BASE / "datos" / "prospeccion"
-CRUDO_P = DIR / "crudo"
+SALIDA = BASE / "prospectos"                 # el repo privado (radar-datos)
+DIR = SALIDA / "prospeccion"
+CRUDO_P = DIR / "crudo"                      # una zona por archivo, comprimido (.json.gz)
+CRUDO = DIR / "estudio"                      # lo que se bajó en el estudio de nichos (también sirve)
 ZONAS = DIR / "zonas.json"
-MX = BASE / "datos" / "mx.json"
+EMAILS = DIR / "emails.json"
+MX = DIR / "mx.json"
 EXPORTADOS = DIR / "exportados.json"
-SALIDA = BASE / "prospectos"
+VIEJO = BASE / "datos"                       # dónde estaba todo antes del 20/11/2026 (solo para migrar)
 
 PALABRAS_ES = {"el", "la", "los", "las", "muy", "comida", "servicio", "excelente", "pero", "que",
                "con", "para", "una", "es", "lugar", "buena", "bueno", "todo", "gracias", "mal",
@@ -85,7 +94,7 @@ def clave(ciudad, zona):
 
 
 def archivo_zona(ciudad, zona):
-    return CRUDO_P / f"{ciudad}__{slug(zona)}.json"
+    return CRUDO_P / f"{ciudad}__{slug(zona)}.json.gz"
 
 
 def zona_hecha(ciudad, zona, estado=None):
@@ -104,7 +113,29 @@ def ubicacion_alternativa(zona):
 
 
 # ---------------------------------------------------------------------------
-def cmd_estimar(api=None):
+def cuentas_apify():
+    return Cuentas(tokens(), fabrica=lambda t: Apify(t))
+
+
+def tope_zona():
+    return costo_zona() * 1.1
+
+
+def zonas_que_alcanzan(cuentas):
+    """Cuántas zonas se pueden pagar con las cuentas, dejando la reserva para las tandas.
+    Cada zona tiene que entrar entera en una sola cuenta."""
+    sobra = cuentas.libre_total() - C.PROSP_RESERVA_USD
+    n = 0
+    for c in cuentas.cuentas:
+        libre = c["libre"] - C.PROSP_MARGEN_USD
+        while libre >= tope_zona() and sobra >= tope_zona():
+            libre -= tope_zona()
+            sobra -= tope_zona()
+            n += 1
+    return n
+
+
+def cmd_estimar(cuentas=None):
     estado = leer_json(ZONAS, {})
     todas = zonas_en_orden()
     hechas = [z for z in todas if zona_hecha(*z, estado)]
@@ -114,73 +145,77 @@ def cmd_estimar(api=None):
     print(f"Zonas: {len(todas)} en total | revisadas: {len(hechas)} | faltan: {len(pendientes)}")
     print(f"Cada zona: hasta {len(C.PROSP_RUBROS) * C.PROSP_NEGOCIOS_POR_BUSQUEDA} negocios "
           f"con {C.PROSP_RESENAS_POR_NEGOCIO} reseñas, como máximo USD {cz:.2f}")
-    libre = None
-    if api:
-        usado, maximo = api.credito()
-        if usado is not None and maximo:
-            libre = maximo - usado
-            print(f"Crédito de Apify este mes: usaste USD {usado:.2f} de {maximo:.2f} (quedan {libre:.2f})")
-    if libre is not None:
-        n = int(max(0.0, libre - C.PROSP_MARGEN_USD) // cz)
-        n = min(n, len(pendientes))
-        print(f"Te alcanza para al menos {n} zonas (más si cada zona sale menos que el máximo)." if n else
-              "No alcanza para ninguna zona: esperá a que se recargue el crédito de Apify.")
-        return pendientes, n, estado
-    return pendientes, None, estado
+    if cuentas is None:
+        return pendientes, None, estado
+    if not cuentas.cuentas:
+        print("Ninguna cuenta de Apify responde: revisá los tokens.")
+        return pendientes, None, estado
+    print(f"Crédito de Apify: USD {cuentas.libre_total():.2f} libres en {len(cuentas.cuentas)} cuentas "
+          f"(USD {C.PROSP_RESERVA_USD:.2f} quedan reservados para las tandas)")
+    n = min(zonas_que_alcanzan(cuentas), len(pendientes))
+    print(f"Alcanza para al menos {n} zonas (más si cada zona sale menos que el máximo)." if n else
+          "No alcanza para ninguna zona: esperá a que se recargue el crédito o sumá otra cuenta.")
+    return pendientes, n, estado
 
 
-def cmd_buscar(confirmar=True):
-    """Revisa zonas una tras otra hasta que se termine el crédito o no queden zonas."""
-    api = Apify(token())
-    pendientes, n, estado = cmd_estimar(api)
+def cmd_buscar(confirmar=True, max_zonas=None):
+    """Revisa zonas una tras otra hasta que se termine el crédito (dejando la reserva para las tandas),
+    se llegue a max_zonas o no queden zonas. Usa todas las cuentas de Apify, en orden."""
+    traer()
+    cuentas = cuentas_apify()
+    pendientes, n, estado = cmd_estimar(cuentas)
     if n is None:
-        sys.exit("No se pudo leer tu crédito de Apify. Probá de nuevo en un rato.")
+        sys.exit("No se pudo leer el crédito de Apify. Probá de nuevo en un rato.")
     # Primero se retoman corridas que hayan quedado a medias.
     en_curso = [tuple(k.split("|", 1)) for k, v in estado.items()
                 if v.get("run_id") and not zona_hecha(*k.split("|", 1), estado)]
     cola = en_curso + [z for z in pendientes if z not in en_curso]
+    if max_zonas is not None:
+        cola = cola[:max(0, max_zonas)]
     if not cola:
         print("No quedan zonas por revisar.")
-        return
+        return 0
     if n == 0 and not en_curso:
-        return
-    usado, maximo = api.credito()
-    if usado is None or not maximo:
-        sys.exit("No se pudo leer tu crédito de Apify. Probá de nuevo en un rato.")
-    libre_inicial = maximo - usado
-    print(f"\nVoy a revisar zonas hasta que se termine el crédito (USD {libre_inicial:.2f} disponibles; "
-          f"cada zona cuesta entre USD 0,50 y {costo_zona():.2f}).")
+        return 0
+    print(f"\nVoy a revisar hasta {min(len(cola), n + len(en_curso))} zonas "
+          f"(cada una cuesta entre USD 0,50 y {costo_zona():.2f}).")
     if confirmar and input("¿Arranco? (s/n) ").strip().lower() not in ("s", "si", "sí", "y"):
         sys.exit("Cancelado. No se gastó nada.")
 
-    gastado, hechas_ahora = 0.0, 0
+    hechas_ahora = 0
     for ciudad, zona in cola:
         k = clave(ciudad, zona)
         previo_k = estado.get(k, {})
         retomar = bool(previo_k.get("run_id"))
-        if not retomar:
-            # Antes de cada zona: ¿alcanza el crédito? Se toma lo menor entre lo que informa
-            # Apify (que a veces tarda en actualizarse) y la cuenta propia de lo gastado.
-            usado, maximo = api.credito()
-            libre_cuenta = libre_inicial - gastado
-            libre = min(maximo - usado, libre_cuenta) if usado is not None and maximo else libre_cuenta
-            if libre - C.PROSP_MARGEN_USD < costo_zona():
-                print(f"\nSe terminó el crédito: quedan USD {max(libre, 0):.2f}, no alcanza para otra zona.")
+        if retomar:
+            cuenta = cuentas.por_id(previo_k.get("cuenta")) or (cuentas.cuentas[0] if cuentas.cuentas else None)
+            if not cuenta:
+                print(f"\n{zona}: no encuentro la cuenta con la que se arrancó. La salteo por ahora.")
+                continue
+        else:
+            if cuentas.libre_total() - tope_zona() < C.PROSP_RESERVA_USD:
+                print(f"\nSe llegó a la reserva para las tandas (quedan USD {cuentas.libre_total():.2f}): freno acá.")
                 break
+            cuenta = cuentas.para(tope_zona() + C.PROSP_MARGEN_USD)
+            if not cuenta:
+                print("\nNinguna cuenta tiene crédito para otra zona entera: freno acá.")
+                break
+        api = cuenta["api"]
         intentos = previo_k.get("vacia", 1 if previo_k.get("negocios") == 0 else 0)
         entrada = entrada_zona(zona if intentos == 0 else ubicacion_alternativa(zona))
         if retomar:
             run_id = previo_k["run_id"]
             print(f"\n{zona}: retomo la corrida que quedó a medias...")
         else:
-            print(f"\n{zona}: arrancando...")
+            print(f"\n{zona}: arrancando (cuenta {cuenta['n']})...")
             try:
-                run_id = api.arrancar(C.ACTOR_MAPS, entrada, costo_zona() * 1.1)["id"]
+                run_id = api.arrancar(C.ACTOR_MAPS, entrada, tope_zona())["id"]
             except ErrorApify as e:
                 print(f"  Apify no dejó arrancar la zona ({e}). Freno acá.")
                 break
-            estado[k] = {"run_id": run_id}
+            estado[k] = {"run_id": run_id, "cuenta": cuenta["id"]}
             guardar_json(ZONAS, estado)
+            subir(f"Prospección: arranca {zona}")
         inicio, aviso = time.time(), [0.0]
 
         def avanzar(_r):
@@ -193,11 +228,11 @@ def cmd_buscar(confirmar=True):
             run = api.esperar(run_id, avanzar)
         except KeyboardInterrupt:
             sys.exit("\nCortado. La corrida sigue en Apify: volvé a correr 'py prospectar.py buscar' y la retoma.")
-        gastado += float(run.get("usageTotalUsd") or 0) or costo_zona()
         items = api.items(run["defaultDatasetId"])
         if not items:
             estado[k] = {"vacia": intentos + 1}
             guardar_json(ZONAS, estado)
+            subir(f"Prospección: {zona} vino vacía")
             print(f"  {zona}: Google Maps no devolvió negocios. "
                   + ("La próxima vez pruebo escribiéndola distinto." if intentos == 0 else "La salteo."))
             continue
@@ -207,25 +242,50 @@ def cmd_buscar(confirmar=True):
             "run_id": run_id, "estado_corrida": run["status"],
             "completa": run["status"] == "SUCCEEDED", "entrada": entrada, "items": items,
         })
-        estado[k] = {"hecha": True, "negocios": len(items)}
+        estado[k] = {"hecha": True, "negocios": len(items), "costo": run.get("usageTotalUsd")}
         guardar_json(ZONAS, estado)
         hechas_ahora += 1
-        print(f"  {zona}: {len(items)} negocios ({run['status']}).")
-        resumen_avance(api)
+        print(f"  {zona}: {len(items)} negocios ({run['status']}), "
+              f"USD {float(run.get('usageTotalUsd') or 0):.2f}. Crédito libre: USD {cuentas.libre_total():.2f}")
+        subir(f"Prospección: {zona} ({len(items)} negocios)")
     print(f"\nListo: {hechas_ahora} zonas nuevas en esta corrida. Seguí con: py prospectar.py lista")
+    return hechas_ahora
 
 
-def resumen_avance(api):
-    """Después de cada zona: crédito que queda y zonas que faltan."""
-    todas = zonas_en_orden()
-    hechas = sum(1 for z in todas if zona_hecha(*z))
-    usado, maximo = api.credito()
-    if usado is not None and maximo:
-        libre = maximo - usado
-        print(f"  Crédito: quedan USD {libre:.2f} | "
-              f"zonas revisadas: {hechas} de {len(todas)}")
-    else:
-        print(f"  Zonas revisadas: {hechas} de {len(todas)} (no se pudo leer el crédito)")
+# ---------------------------------------------------------------------------
+# Sincronización con el repo privado (para que la nube y las dos PC vean lo mismo)
+# ---------------------------------------------------------------------------
+def _git(*args):
+    return subprocess.run(["git", *args], cwd=SALIDA, capture_output=True, text=True)
+
+
+def _usa_git():
+    return (SALIDA / ".git").exists() and bool(_git("remote").stdout.strip())
+
+
+def traer():
+    if _usa_git() and _git("pull", "--rebase").returncode != 0:
+        sys.exit("No se pudo traer lo último de GitHub (git pull falló en prospectos/). Resolvelo antes de seguir.")
+
+
+def subir(mensaje):
+    """Sube el avance de la prospección. Si mientras tanto el envío automático subió algo, lo trae y reintenta."""
+    if not _usa_git():
+        return True
+    rutas = [x for x in ("prospeccion", "prospectos_todos.csv") if (SALIDA / x).exists()]
+    rutas += [p.name for p in SALIDA.glob("prospectos_nuevos_*.csv")]
+    if not rutas:
+        return True
+    _git("add", "-A", "--", *rutas)
+    if _git("diff", "--cached", "--quiet").returncode == 0:
+        return True
+    _git("commit", "-m", mensaje)
+    for _ in range(5):
+        if _git("push").returncode == 0:
+            return True
+        _git("pull", "--rebase")
+    print("  OJO: no se pudo subir el avance a GitHub (se reintenta con la próxima zona).")
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -234,16 +294,39 @@ def resumen_avance(api):
 def cargar_bloques():
     bloques = []
     for ciudad in C.PROSP_ZONAS:
-        p = CRUDO / f"{ciudad}.json"           # lo que ya se bajó en el estudio, sin costo extra
+        p = CRUDO / f"{ciudad}.json.gz"        # lo que ya se bajó en el estudio, sin costo extra
         if p.exists():
             b = leer_json(p, {})
             b["zona"] = "estudio"
             bloques.append((ciudad, b))
-    for p in sorted(CRUDO_P.glob("*.json")):
+    for p in sorted(CRUDO_P.glob("*.json.gz")):
         b = leer_json(p, {})
         if b.get("ciudad") in C.PROSP_ZONAS:
             bloques.append((b["ciudad"], b))
     return bloques
+
+
+def cmd_migrar():
+    """Pasa los datos de la prospección de datos/ (solo en la PC) a prospectos/prospeccion/ (en GitHub,
+    comprimidos). No borra nada de datos/. Se puede repetir: no pisa lo que ya está migrado."""
+    pares = [(p, CRUDO_P / (p.stem + ".json.gz")) for p in sorted((VIEJO / "prospeccion" / "crudo").glob("*.json"))]
+    pares += [(p, CRUDO / (p.stem + ".json.gz")) for p in sorted((VIEJO / "crudo").glob("*.json"))]
+    pares += [(VIEJO / "prospeccion" / "zonas.json", ZONAS), (VIEJO / "prospeccion" / "exportados.json", EXPORTADOS),
+              (VIEJO / "emails.json", EMAILS), (VIEJO / "mx.json", MX)]
+    hechos = 0
+    for origen, destino in pares:
+        if not origen.exists() or destino.exists():
+            continue
+        datos = leer_json(origen, None)
+        if datos is None:
+            print(f"  No pude leer {origen.name}: lo salteo.")
+            continue
+        guardar_json(destino, datos)
+        hechos += 1
+    print(f"Migrados {hechos} archivos a {DIR}.")
+    if hechos:
+        subir("Prospección: datos migrados desde la PC")
+    return hechos
 
 
 def es_espanol(texto):
@@ -421,6 +504,11 @@ def cmd_lista():
         filas.append(n)
 
     filas.sort(key=lambda f: (f["prioridad"], -f["puntaje"], -f["sin_resp_reciente"]))
+    todas = filas
+    # Solo quedan las prioridades elegidas (hoy, solo A). Los B que se sumen tienen que tener
+    # una reseña negativa sin responder: es el mejor gancho.
+    filas = [f for f in filas if f["prioridad"] in C.PROSP_PRIORIDADES
+             and (f["prioridad"] != "B" or f.get("negativa_sin_resp") in (True, "si"))]
     nuevos = [f for f in filas if f["email"].lower() not in exportados]
     for f in nuevos:
         exportados[f["email"].lower()] = hoy
@@ -431,24 +519,38 @@ def cmd_lista():
     if nuevos:
         escribir_csv(SALIDA / f"prospectos_nuevos_{hoy}.csv", nuevos, COLUMNAS)
 
-    print(f"\n{'Rubro':<32}{'A':>5}{'B':>5}{'C':>5}{'Total':>7}")
+    print(f"\n{'Rubro':<32}{'A':>5}{'B':>5}{'C':>5}{'En lista':>10}")
     for r in C.PROSP_RUBROS:
-        cuenta = [sum(1 for f in filas if f["rubro"] == r and f["prioridad"] == x) for x in "ABC"]
-        print(f"{C.RUBROS[r]['nombre']:<32}" + "".join(f"{c:>5}" for c in cuenta) + f"{sum(cuenta):>7}")
-    print(f"\nTotal: {len(filas)} prospectos | nuevos en esta lista: {len(nuevos)}")
+        cuenta = [sum(1 for f in todas if f["rubro"] == r and f["prioridad"] == x) for x in "ABC"]
+        quedan = sum(1 for f in filas if f["rubro"] == r)
+        print(f"{C.RUBROS[r]['nombre']:<32}" + "".join(f"{c:>5}" for c in cuenta) + f"{quedan:>10}")
+    print(f"\nEn la lista quedan solo: {', '.join(C.PROSP_PRIORIDADES)}"
+          f"{' (B solo con negativa sin responder)' if 'B' in C.PROSP_PRIORIDADES else ''}")
+    print(f"Total: {len(filas)} prospectos | nuevos en esta lista: {len(nuevos)}")
     print(f"Archivos en: {SALIDA}")
+    subir(f"Prospección: lista rearmada ({len(filas)} prospectos, {len(nuevos)} nuevos)")
     return filas, nuevos
 
 
 def main():
-    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    args = sys.argv[1:]
+    cmd = args[0] if args else ""
     try:
         if cmd == "estimar":
-            cmd_estimar(Apify(token()))
+            cmd_estimar(cuentas_apify())
         elif cmd == "buscar":
-            cmd_buscar()
+            maximo = None
+            if "--max" in args:
+                try:
+                    maximo = int(args[args.index("--max") + 1])
+                except (IndexError, ValueError):
+                    sys.exit("Uso: py prospectar.py buscar --max 10")
+            cmd_buscar(confirmar="--si" not in args, max_zonas=maximo)
         elif cmd == "lista":
+            traer()
             cmd_lista()
+        elif cmd == "migrar":
+            cmd_migrar()
         else:
             print(__doc__)
     except ErrorApify as e:

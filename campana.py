@@ -34,6 +34,7 @@ from datetime import date, datetime, timedelta, timezone
 import config as C
 from analisis import fecha
 from apify import Apify, ErrorApify
+from apify import Cuentas as _Cuentas
 from estudio import BASE, guardar_json, leer_json, token, tokens
 from prospectar import es_espanol, gancho
 
@@ -243,9 +244,9 @@ def cargar_prospectos():
 
 def lugares_guardados():
     """Último dato crudo de cada negocio (del estudio y de la prospección), por placeId."""
+    import prospectar as P
     out = {}
-    archivos = sorted((BASE / "datos" / "crudo").glob("*.json")) + \
-        sorted((BASE / "datos" / "prospeccion" / "crudo").glob("*.json"))
+    archivos = sorted(P.CRUDO.glob("*.json.gz")) + sorted(P.CRUDO_P.glob("*.json.gz"))
     for p in archivos:
         b = leer_json(p, {})
         for l in b.get("items", []):
@@ -289,7 +290,8 @@ def verificar(api, place_ids):
 # ---------------------------------------------------------------------------
 # Horario de envío
 # ---------------------------------------------------------------------------
-_DESFASE_INVIERNO = {"America/New_York": -5, "America/Chicago": -6, "America/Los_Angeles": -8}
+_DESFASE_INVIERNO = {"America/New_York": -5, "America/Chicago": -6, "America/Phoenix": -7,
+                     "America/Los_Angeles": -8}
 
 
 def zona_ciudad(ciudad):
@@ -394,30 +396,9 @@ def evaluar(p, lugar, cuando, verificado):
 VERIFICACION = {"rondas": 0, "gasto": 0.0, "credito_libre": None}   # lo de la última tanda (para alertas)
 
 
-class Cuentas:
-    """Las cuentas de Apify disponibles (una por token), en orden. Usa la primera que tenga crédito
-    para lo que hace falta; si se queda corta, pasa a la siguiente. Nunca muestra los tokens."""
-
-    def __init__(self, lista=None):
-        self.cuentas = []
-        for i, t in enumerate(lista if lista is not None else tokens(), 1):
-            api = Apify(t)
-            usado, maximo = api.credito()
-            if usado is None or not maximo:
-                print(f"  Cuenta de Apify {i}: no responde o el token no es válido (se saltea).")
-                continue
-            self.cuentas.append({"n": i, "api": api, "libre": maximo - usado, "usado": usado, "maximo": maximo})
-
-    def libre_total(self):
-        return round(sum(max(c["libre"], 0) for c in self.cuentas), 2)
-
-    def para(self, costo):
-        """La primera cuenta con crédito para 'costo' (lo descuenta), o None."""
-        for c in self.cuentas:
-            if c["libre"] >= costo:
-                c["libre"] -= costo
-                return c
-        return None
+def Cuentas(lista=None):
+    """Las cuentas de Apify (ver apify.Cuentas): por defecto, todos los tokens en orden."""
+    return _Cuentas(lista if lista is not None else tokens(), fabrica=lambda t: Apify(t))
 
 
 def cmd_apify():

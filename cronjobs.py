@@ -4,6 +4,7 @@ El cron de GitHub no es confiable (puede atrasarse horas o saltearse). cron-job.
 las Actions por la API de GitHub (workflow_dispatch) en el minuto exacto:
   - tanda: lunes a viernes 6:47 ART
   - envio: lunes a viernes cada 15 minutos, de 11:02 a 19:47 ART
+  - prospeccion: domingos 10:07 ART (busca zonas nuevas con el crédito que sobre y rearma la lista)
 
 Uso (una sola vez):
     py cronjobs.py            pide las dos claves (no se muestran) y crea o actualiza las tareas
@@ -27,6 +28,7 @@ LUNES_A_VIERNES = [1, 2, 3, 4, 5]
 TAREAS = {
     "Tinko - tanda": {"workflow": "tanda.yml", "hours": [6], "minutes": [47]},
     "Tinko - envio": {"workflow": "envio.yml", "hours": list(range(11, 20)), "minutes": [2, 17, 32, 47]},
+    "Tinko - prospeccion": {"workflow": "prospeccion.yml", "hours": [10], "minutes": [7], "wdays": [0]},
 }
 
 
@@ -49,7 +51,8 @@ def armar_tarea(titulo, datos, token_github):
         "requestMethod": 1,                                     # POST
         "requestTimeout": 30,
         "schedule": {"timezone": ZONA, "expiresAt": 0, "hours": datos["hours"], "mdays": [-1],
-                     "minutes": datos["minutes"], "months": [-1], "wdays": LUNES_A_VIERNES},
+                     "minutes": datos["minutes"], "months": [-1],
+                     "wdays": datos.get("wdays", LUNES_A_VIERNES)},
         "extendedData": {"headers": cabeceras_github(token_github), "body": json.dumps({"ref": "main"})},
         "notification": {"onFailure": True, "onFailureCount": 1, "onSuccess": False, "onDisable": True},
     }

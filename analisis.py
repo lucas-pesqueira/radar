@@ -306,7 +306,7 @@ def construir_negocios(crudo, emails=None, con_lugar=False):
         mail = emails.get(d) if d else None
         f.update({
             "rubro_nombre": C.RUBROS[f["rubro"]]["nombre"],
-            "ciudad_nombre": C.CIUDADES.get(f["ciudad"], {}).get("nombre", f["ciudad"]),
+            "ciudad_nombre": C.TODAS_CIUDADES.get(f["ciudad"], {}).get("nombre", f["ciudad"]),
             "nombre": l.get("title"),
             "categoria": l.get("categoryName"),
             "posicion_maps": l.get("rank"),
@@ -357,7 +357,7 @@ def resumir(negocios, claves, con_emails=False):
             fila["rubro_nombre"] = C.RUBROS[fila["rubro"]]["nombre"]
             fila["ticket"] = C.RUBROS[fila["rubro"]]["ticket"]
         if "ciudad" in claves:
-            fila["ciudad_nombre"] = C.CIUDADES.get(fila["ciudad"], {}).get("nombre", fila["ciudad"])
+            fila["ciudad_nombre"] = C.TODAS_CIUDADES.get(fila["ciudad"], {}).get("nombre", fila["ciudad"])
         fila.update({
             "encontrados": len(ns),
             "otra_categoria": sum(1 for n in ns if not n["categoria_ok"]),

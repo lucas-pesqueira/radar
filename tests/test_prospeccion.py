@@ -432,23 +432,29 @@ def test_espanol():
 
 
 # --- cmd_lista de punta a punta ------------------------------------------------
+def usar_carpeta(monkeypatch, tmp_path):
+    """Toda la prospección en una carpeta temporal (sin git: no se sube nada)."""
+    salida = tmp_path / "salida"
+    d = salida / "prospeccion"
+    for nombre, valor in [("SALIDA", salida), ("DIR", d), ("CRUDO_P", d / "crudo"), ("CRUDO", d / "estudio"),
+                          ("ZONAS", d / "zonas.json"), ("EMAILS", d / "emails.json"), ("MX", d / "mx.json"),
+                          ("EXPORTADOS", d / "exportados.json"), ("VIEJO", tmp_path / "datos")]:
+        monkeypatch.setattr(P, nombre, valor)
+    (d / "crudo").mkdir(parents=True)
+
+
 @pytest.fixture
 def lista(tmp_path, monkeypatch):
-    crudo_p = tmp_path / "prosp" / "crudo"
-    crudo_p.mkdir(parents=True)
-    monkeypatch.setattr(P, "CRUDO", tmp_path / "crudo_estudio")
-    monkeypatch.setattr(P, "CRUDO_P", crudo_p)
-    monkeypatch.setattr(P, "EMAILS", tmp_path / "emails.json")
-    monkeypatch.setattr(P, "MX", tmp_path / "mx.json")
-    monkeypatch.setattr(P, "EXPORTADOS", tmp_path / "exportados.json")
-    monkeypatch.setattr(P, "SALIDA", tmp_path / "salida")
+    usar_carpeta(monkeypatch, tmp_path)
     monkeypatch.setattr(P.C, "PROSP_ZONAS", {"atlanta": ["Midtown, Atlanta, Georgia, USA"]})
+    monkeypatch.setattr(P.C, "PROSP_PRIORIDADES", ["A", "B", "C"])
     return tmp_path
 
 
 def correr_lista(tmp, items, mails, mx=None, monkeypatch=None):
-    (P.CRUDO_P / "atlanta__midtown.json").write_text(json.dumps(
-        {"ciudad": "atlanta", "zona": "Midtown, Atlanta, Georgia, USA", "fecha": AHORA.isoformat(), "items": items}))
+    P.guardar_json(P.CRUDO_P / "atlanta__midtown.json.gz",
+                   {"ciudad": "atlanta", "zona": "Midtown, Atlanta, Georgia, USA", "fecha": AHORA.isoformat(),
+                    "items": items})
     import emails as EM
     monkeypatch.setattr(EM, "buscar_todos", lambda webs, previos, avanzar=None: {**previos, **mails})
     monkeypatch.setattr(EM, "chequear_mx", lambda doms, previos: {**{d: True for d in doms}, **(mx or {})})
@@ -508,6 +514,26 @@ def test_lista_sin_datos(lista):
         P.cmd_lista()
 
 
+def test_lista_exigente_solo_a(lista, monkeypatch):
+    """Con PROSP_PRIORIDADES = ["A"] (lo de hoy) quedan solo los A; los B, solo con negativa si se suman."""
+    items = [lugar("Pizza Mario", "pizzamario-x.com"),                                       # A
+             lugar("Taco Loco", "tacoloco-x.com", reviews=[resena(400, 4, "ok"), resena(500)]),  # C
+             lugar("Ya Responde", "responde-x.com", reviews=[resena(3, 1, "Rude, cold food"), resena(5),
+                   resena(9, respuesta="Thanks"), resena(12, respuesta="Thanks"), resena(14, respuesta="Thanks"),
+                   resena(16, respuesta="Thanks"), resena(18, respuesta="Thanks"), resena(19, respuesta="Thanks")]),
+             lugar("Responde Sin Negativa", "rsn-x.com", reviews=[resena(5), resena(8, respuesta="Thanks"),
+                   resena(9, respuesta="Thanks"), resena(12, respuesta="Thanks"), resena(14, respuesta="Thanks"),
+                   resena(16, respuesta="Thanks"), resena(18, respuesta="Thanks"), resena(19, respuesta="Thanks")])]
+    mails = {d: {"estado": "ok", "email": f"info@{d}", "emails": [f"info@{d}"]}
+             for d in ("pizzamario-x.com", "tacoloco-x.com", "responde-x.com", "rsn-x.com")}
+    monkeypatch.setattr(P.C, "PROSP_PRIORIDADES", ["A"])
+    _, _, filas = correr_lista(lista, items, mails, None, monkeypatch)
+    assert [f["nombre"] for f in filas] == ["Pizza Mario"]
+    monkeypatch.setattr(P.C, "PROSP_PRIORIDADES", ["A", "B"])
+    _, _, filas = correr_lista(lista, items, mails, None, monkeypatch)
+    assert {f["nombre"]: f["prioridad"] for f in filas} == {"Pizza Mario": "A", "Ya Responde": "B"}
+
+
 # --- cmd_buscar con un Apify inventado --------------------------------------------
 class ApifyFalso:
     def __init__(self, libre=5.0, items_por_zona=None):
@@ -533,21 +559,59 @@ class ApifyFalso:
 
 @pytest.fixture
 def buscar(tmp_path, monkeypatch):
-    monkeypatch.setattr(P, "CRUDO_P", tmp_path / "crudo")
-    monkeypatch.setattr(P, "ZONAS", tmp_path / "zonas.json")
+    usar_carpeta(monkeypatch, tmp_path)
     monkeypatch.setattr(P.C, "PROSP_ZONAS", {"atlanta": ["Midtown, Atlanta, Georgia, USA", "Buckhead, Atlanta, Georgia, USA"],
                                              "houston": ["Heights, Houston, Texas, USA"]})
-    monkeypatch.setattr(P, "costo_zona", lambda: 0.6)
-    monkeypatch.setattr(P, "token", lambda: "x")
+    monkeypatch.setattr(P, "costo_zona", lambda: 0.6)               # tope por zona: 0,66 + 0,10 de margen
+    monkeypatch.setattr(P.C, "PROSP_RESERVA_USD", 0.0)
+    monkeypatch.setattr(P, "tokens", lambda: ["t1"])
     return tmp_path
 
 
+def con_cuentas(monkeypatch, **apis):
+    monkeypatch.setattr(P, "tokens", lambda: list(apis))
+    monkeypatch.setattr(P, "Apify", lambda t: apis[t])
+
+
 def test_buscar_hasta_que_alcanza_el_credito(buscar, monkeypatch):
-    api = ApifyFalso(libre=1.4)
-    monkeypatch.setattr(P, "Apify", lambda t: api)
-    P.cmd_buscar(confirmar=False)
+    api = ApifyFalso(libre=1.6)
+    con_cuentas(monkeypatch, t1=api)
+    assert P.cmd_buscar(confirmar=False) == 2
     assert api.arrancadas == ["Midtown, Atlanta, Georgia, USA", "Heights, Houston, Texas, USA"]
     assert P.zona_hecha("atlanta", "Midtown, Atlanta, Georgia, USA")
+    assert P.archivo_zona("atlanta", "Midtown, Atlanta, Georgia, USA").name.endswith(".json.gz")
+
+
+def test_buscar_pasa_a_la_siguiente_cuenta(buscar, monkeypatch):
+    a, b, c = ApifyFalso(libre=0.5), ApifyFalso(libre=0.9), ApifyFalso(libre=5)
+    con_cuentas(monkeypatch, t1=a, t2=b, t3=c)
+    assert P.cmd_buscar(confirmar=False) == 3
+    assert a.arrancadas == [] and len(b.arrancadas) == 1 and len(c.arrancadas) == 2
+
+
+def test_buscar_respeta_la_reserva_para_las_tandas(buscar, monkeypatch):
+    api = ApifyFalso(libre=3.0)
+    con_cuentas(monkeypatch, t1=api)
+    monkeypatch.setattr(P.C, "PROSP_RESERVA_USD", 2.0)
+    assert P.cmd_buscar(confirmar=False) == 1                       # 3,00 - 0,76 = 2,24; otra la dejaría en 1,48
+
+
+def test_buscar_con_maximo_de_zonas(buscar, monkeypatch):
+    api = ApifyFalso(libre=5)
+    con_cuentas(monkeypatch, t1=api)
+    assert P.cmd_buscar(confirmar=False, max_zonas=1) == 1 and len(api.arrancadas) == 1
+
+
+def test_retoma_con_la_misma_cuenta(buscar, monkeypatch):
+    a, b = ApifyFalso(libre=5), ApifyFalso(libre=5)
+    con_cuentas(monkeypatch, t1=a, t2=b)
+    zona = "Midtown, Atlanta, Georgia, USA"
+    import hashlib
+    b.arrancadas.append(zona)                                       # la corrida run1 es de la cuenta 2
+    P.guardar_json(P.ZONAS, {f"atlanta|{zona}": {"run_id": "run1", "cuenta": hashlib.sha256(b"t2").hexdigest()[:10]}})
+    monkeypatch.setattr(P.C, "PROSP_ZONAS", {"atlanta": [zona]})
+    P.cmd_buscar(confirmar=False)
+    assert a.arrancadas == [] and P.zona_hecha("atlanta", zona)
 
 
 def test_zona_vacia_se_reintenta_escrita_distinto_y_despues_se_saltea(buscar, monkeypatch):
@@ -556,7 +620,7 @@ def test_zona_vacia_se_reintenta_escrita_distinto_y_despues_se_saltea(buscar, mo
     monkeypatch.setattr(P.C, "PROSP_ZONAS", {"atlanta": [zona]})
     for intento in range(3):
         api = ApifyFalso(libre=5, items_por_zona=vacia)
-        monkeypatch.setattr(P, "Apify", lambda t: api)
+        con_cuentas(monkeypatch, t1=api)
         P.cmd_buscar(confirmar=False)
         if intento == 0:
             assert api.arrancadas == [zona]
@@ -569,6 +633,80 @@ def test_zona_vacia_se_reintenta_escrita_distinto_y_despues_se_saltea(buscar, mo
 def test_buscar_sin_poder_leer_el_credito(buscar, monkeypatch):
     api = ApifyFalso()
     api.credito = lambda: (None, None)
-    monkeypatch.setattr(P, "Apify", lambda t: api)
-    with pytest.raises(SystemExit):
+    con_cuentas(monkeypatch, t1=api)
+    with pytest.raises(SystemExit):                                 # ninguna cuenta responde: frena con error
         P.cmd_buscar(confirmar=False)
+    assert api.arrancadas == []
+
+
+# --- migración y archivos comprimidos ------------------------------------------------
+def test_migrar_desde_datos(tmp_path, monkeypatch):
+    usar_carpeta(monkeypatch, tmp_path)
+    viejo = tmp_path / "datos"
+    (viejo / "prospeccion" / "crudo").mkdir(parents=True)
+    (viejo / "crudo").mkdir(parents=True)
+    (viejo / "prospeccion" / "crudo" / "atlanta__midtown.json").write_text(json.dumps({"items": [{"title": "X"}]}))
+    (viejo / "crudo" / "atlanta.json").write_text(json.dumps({"items": [{"title": "Y"}]}))
+    (viejo / "prospeccion" / "zonas.json").write_text(json.dumps({"atlanta|Midtown": {"hecha": True}}))
+    (viejo / "emails.json").write_text(json.dumps({"x-x.com": {"email": "a@x-x.com"}}))
+    (viejo / "mx.json").write_text("roto{")
+    assert P.cmd_migrar() == 4                                      # el mx roto se saltea
+    assert P.leer_json(P.CRUDO_P / "atlanta__midtown.json.gz", {})["items"][0]["title"] == "X"
+    assert P.leer_json(P.CRUDO / "atlanta.json.gz", {})["items"][0]["title"] == "Y"
+    assert P.cmd_migrar() == 0                                      # repetirlo no pisa nada
+
+
+def test_comprimido_igual_para_los_mismos_datos(tmp_path):
+    a, b = tmp_path / "a.json.gz", tmp_path / "b.json.gz"
+    P.guardar_json(a, {"x": "ñandú", "n": [1, 2]})
+    P.guardar_json(b, {"x": "ñandú", "n": [1, 2]})
+    assert a.read_bytes() == b.read_bytes() and P.leer_json(a, None) == {"x": "ñandú", "n": [1, 2]}
+    assert P.leer_json(tmp_path / "no-existe.json.gz", "def") == "def"
+
+
+# --- configuración de las ciudades --------------------------------------------------
+def test_ciudades_bien_configuradas():
+    import campana
+    for ciudad, zonas in C.PROSP_ZONAS.items():
+        assert ciudad in C.TODAS_CIUDADES, ciudad
+        nombre = C.TODAS_CIUDADES[ciudad]["nombre"]
+        zona_horaria = campana.zona_ciudad(nombre)
+        assert any(k in nombre.lower() for k in C.ZONAS_CIUDAD), f"{nombre} sin zona horaria"
+        assert zona_horaria in campana._DESFASE_INVIERNO
+        assert len(zonas) == len(set(zonas)), f"zonas repetidas en {ciudad}"
+        assert all(z.endswith(", USA") and z.count(",") >= 2 for z in zonas)
+    archivos = [P.archivo_zona(c, z).name for c, z in P.zonas_en_orden()]
+    assert len(archivos) == len(set(archivos))
+    assert campana.zona_ciudad("Phoenix, AZ") == "America/Phoenix"
+    assert campana.zona_ciudad("Las Vegas, NV") == "America/Los_Angeles"
+
+
+def test_subir_con_git_real_aunque_falte_la_lista(tmp_path, monkeypatch):
+    """El avance se sube aunque todavía no exista prospectos_todos.csv, y aunque otro haya subido algo antes."""
+    import subprocess as sp
+
+    def g(cwd, *a):
+        sp.run(["git", *a], cwd=cwd, check=True, capture_output=True)
+    remoto, a, b = tmp_path / "remoto.git", tmp_path / "a", tmp_path / "b"
+    g(tmp_path, "init", "-q", "--bare", "-b", "main", str(remoto))
+    for d in (a, b):
+        g(tmp_path, "clone", "-q", str(remoto), str(d))
+        g(d, "config", "user.email", "x@x-x.com")
+        g(d, "config", "user.name", "x")
+        g(d, "config", "pull.rebase", "true")
+    (a / "campana").mkdir()
+    (a / "campana" / "registro.json").write_text("{}")
+    g(a, "add", "-A")
+    g(a, "commit", "-qm", "init")
+    g(a, "push", "-q", "-u", "origin", "HEAD:main")
+    g(b, "pull", "-q", "origin", "main")
+    g(b, "branch", "-q", "-u", "origin/main")
+    (a / "campana" / "registro.json").write_text('{"x": 1}')                # "el envío" sube algo
+    g(a, "commit", "-qam", "envio")
+    g(a, "push", "-q")
+    usar_carpeta(monkeypatch, tmp_path)
+    monkeypatch.setattr(P, "SALIDA", b)
+    P.guardar_json(b / "prospeccion" / "zonas.json", {"z": {"hecha": True}})
+    assert P.subir("Prospección: prueba")
+    g(a, "pull", "-q")
+    assert (a / "prospeccion" / "zonas.json").exists() and (a / "campana" / "registro.json").read_text() == '{"x": 1}'

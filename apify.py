@@ -1,5 +1,6 @@
 """Cliente mínimo de la API de Apify: arrancar un actor, esperar y bajar resultados."""
 
+import hashlib
 import time
 
 import requests
@@ -79,3 +80,35 @@ class Apify:
             if len(r) < lote:
                 return todos
             offset += lote
+
+
+class Cuentas:
+    """Varias cuentas de Apify (una por token), en orden. Usa la primera que tenga crédito para lo
+    que hace falta y, si se queda corta, pasa a la siguiente. Nunca muestra los tokens: cada cuenta
+    se identifica por su número de orden y por un id corto (huella del token)."""
+
+    def __init__(self, lista, fabrica=None, avisar=print):
+        fabrica = fabrica or Apify
+        self.cuentas = []
+        for i, t in enumerate(lista, 1):
+            api = fabrica(t)
+            usado, maximo = api.credito()
+            if usado is None or not maximo:
+                avisar(f"  Cuenta de Apify {i}: no responde o el token no es válido (se saltea).")
+                continue
+            self.cuentas.append({"n": i, "id": hashlib.sha256(t.encode()).hexdigest()[:10], "api": api,
+                                 "libre": maximo - usado, "usado": usado, "maximo": maximo})
+
+    def libre_total(self):
+        return round(sum(max(c["libre"], 0) for c in self.cuentas), 2)
+
+    def para(self, costo):
+        """La primera cuenta con crédito para 'costo' (lo descuenta), o None."""
+        for c in self.cuentas:
+            if c["libre"] >= costo:
+                c["libre"] -= costo
+                return c
+        return None
+
+    def por_id(self, cid):
+        return next((c for c in self.cuentas if c["id"] == cid), None)
