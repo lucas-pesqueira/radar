@@ -4,6 +4,8 @@ Uso (desde esta carpeta):
     py campana.py tanda              arma la tanda de hoy (verifica las reseñas en vivo con Apify)
     py campana.py tanda --prueba     igual, pero sin Apify y sin guardar nada (para probar)
     py campana.py tanda --forzar     arma aunque hoy sea fin de semana o feriado en EEUU
+    py campana.py tanda --auto       para la nube: si hoy no toca tanda (feriado o ya armada) termina sin error,
+                                     y si no puede subir el registro a GitHub termina con error
     py campana.py enviado MAIL       el mail armado para ese prospecto salió (lo usa el envío automático)
     py campana.py respondio MAIL     el negocio respondió: no recibe más seguimientos
     py campana.py baja MAIL          pidió no recibir más mails: no se le escribe nunca más (ni a nadie de su dominio)
@@ -460,14 +462,22 @@ def archivo_tanda(d, prueba):
     return archivo
 
 
-def cmd_tanda(prueba=False, limite=None, forzar=False):
+def _nada_que_hacer(mensaje, auto):
+    """Sin --auto corta con aviso; con --auto (la nube) lo informa y termina bien: no es un error."""
+    if auto:
+        print(mensaje)
+        return None
+    sys.exit(mensaje)
+
+
+def cmd_tanda(prueba=False, limite=None, forzar=False, auto=False):
     limite = limite or C.ENVIOS_POR_DIA
     dia = hoy()
     d = dia.isoformat()
     motivo = motivo_no_habil(dia)
     if motivo and not forzar:
-        sys.exit(f"El {d} no es día hábil en EEUU ({motivo}): no se arma tanda. "
-                 f"Si igual querés armarla: py campana.py tanda --forzar")
+        return _nada_que_hacer(f"El {d} no es día hábil en EEUU ({motivo}): no se arma tanda. "
+                               f"Si igual querés armarla: py campana.py tanda --forzar", auto)
     registro = leer_registro()
     bajas = leer_bajas()
     confirmar_armados(registro)
@@ -476,7 +486,8 @@ def cmd_tanda(prueba=False, limite=None, forzar=False):
     if ya_hoy and not prueba:
         limite -= len(ya_hoy)
         if limite <= 0:
-            sys.exit(f"Ya se armó la tanda de hoy ({len(ya_hoy)} mails). La próxima, el próximo día hábil.")
+            return _nada_que_hacer(f"Ya se armó la tanda de hoy ({len(ya_hoy)} mails). "
+                                   f"La próxima, el próximo día hábil.", auto)
         print(f"Hoy ya hay {len(ya_hoy)} mails armados: se arman {limite} más para completar el cupo.")
 
     # 1) Seguimientos primero: son los que ya están en conversación.
@@ -531,7 +542,8 @@ def cmd_tanda(prueba=False, limite=None, forzar=False):
     for it in items:
         print(f"  {it['hora_art']}  {it['tipo']:<14} {it['negocio']} ({it['ciudad']})")
     print(f"Archivo: {archivo}")
-    print("Avisale a Claude que la tanda está lista para escribir los mails.")
+    if not auto:
+        print("Avisale a Claude que la tanda está lista para escribir los mails.")
     return tanda
 
 
@@ -600,7 +612,7 @@ def cmd_marcar(email, estado):
         if a:
             r.pop("armado")
             if estado != "descartado":
-                print(f"  OJO: tenía un {a['tipo']} armado para el {a['fecha']}. Si está programado en Gmail, desprogramalo.")
+                print(f"  OJO: tenía un {a['tipo']} armado para el {a['fecha']}. Ya no sale; si hay un borrador en Gmail, borralo.")
         r["estado"] = estado
         r["fechas"][estado] = hoy().isoformat()
         print(f"{email}: {estado}.")
@@ -684,8 +696,8 @@ def sync_antes():
     print("Registro al día con GitHub.")
 
 
-def sync_despues(mensaje):
-    """Sube el registro para que la otra PC lo vea. Si falla, lo avisa fuerte."""
+def sync_despues(mensaje, estricto=False):
+    """Sube el registro para que la otra PC lo vea. Si falla, lo avisa fuerte (con estricto, termina con error)."""
     if not _usa_git() or not DIR.exists():
         return
     _git("add", "-A")
@@ -694,6 +706,8 @@ def sync_despues(mensaje):
     c = _git("commit", "-m", mensaje)
     p = _git("push") if c.returncode == 0 else c
     if p.returncode != 0:
+        if estricto:
+            sys.exit("El registro NO se subió a GitHub:\n" + (p.stderr or p.stdout).strip())
         print("\n!!! ATENCIÓN: el registro NO se subió a GitHub. No uses la otra PC hasta resolverlo.\n"
               + (p.stderr or p.stdout).strip() + "\nProbá a mano: git push")
     else:
@@ -710,10 +724,11 @@ def main():
     try:
         if cmd == "tanda":
             prueba = "--prueba" in args
+            auto = "--auto" in args
             sync_antes()
-            cmd_tanda(prueba=prueba, forzar="--forzar" in args)
-            if not prueba:
-                sync_despues(f"Tanda {hoy().isoformat()}")
+            hecha = cmd_tanda(prueba=prueba, forzar="--forzar" in args, auto=auto)
+            if hecha and not prueba:
+                sync_despues(f"Tanda {hoy().isoformat()}", estricto=auto)
         elif cmd in MARCAS and len(args) > 1:
             sync_antes()
             cmd_marcar(args[1], MARCAS[cmd])

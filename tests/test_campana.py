@@ -317,7 +317,7 @@ def test_baja_de_alguien_con_mail_armado(camp, monkeypatch, capsys):
     t = tanda(camp, monkeypatch, "2026-11-30", limite=2)
     e = t["items"][0]["email"]
     camp.cmd_marcar(e, "baja")
-    assert "desprogramalo" in capsys.readouterr().out
+    assert "borralo" in capsys.readouterr().out
     assert e in json.loads(camp.BAJAS.read_text())
     assert reg(camp)[e]["estado"] == "baja" and "armado" not in reg(camp)[e]
 
@@ -385,3 +385,32 @@ def test_horario_sin_tzdata(monkeypatch):
     it = [{"ciudad": "Houston, TX"}, {"ciudad": "Los Angeles, CA"}]
     c.asignar_horarios(it, date(2026, 12, 1))
     assert it[0]["hora_art"].startswith("13:") and it[1]["hora_art"].startswith("15:")
+
+
+# --- modo nube (--auto) -----------------------------------------------------
+@pytest.mark.parametrize("dia", ["2026-11-28", "2026-11-26"])
+def test_auto_en_feriado_termina_sin_error(camp, monkeypatch, dia):
+    assert tanda(camp, monkeypatch, dia, auto=True) is None
+    assert reg(camp) == {}
+
+
+def test_auto_tanda_ya_armada_termina_sin_error(camp, monkeypatch):
+    t = tanda(camp, monkeypatch, "2026-11-30", auto=True)
+    assert len(t["items"]) == 20
+    antes = reg(camp)
+    assert tanda(camp, monkeypatch, "2026-11-30", auto=True) is None
+    assert reg(camp) == antes
+    with pytest.raises(SystemExit):                                  # a mano sigue avisando
+        tanda(camp, monkeypatch, "2026-11-30")
+
+
+def test_auto_push_fallido_termina_con_error(camp, monkeypatch):
+    import subprocess
+    (camp.DATOS / ".git").mkdir()
+    def git_falso(*args):
+        rc = 1 if args[0] in ("push",) else (1 if args[:2] == ("diff", "--cached") else 0)
+        return subprocess.CompletedProcess(args, rc, stdout="origin" if args[0] == "remote" else "", stderr="rechazado")
+    monkeypatch.setattr(camp, "_git", git_falso)
+    with pytest.raises(SystemExit):
+        camp.sync_despues("Tanda", estricto=True)
+    camp.sync_despues("Tanda")                                        # sin estricto solo avisa

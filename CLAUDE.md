@@ -13,7 +13,7 @@ Herramienta de Lucas para armar listas de negocios de EEUU (administradoras, mud
 - `prospectos/` es otro repo, privado (`radar-datos`), anidado dentro de este. Ahí viven la lista de prospectos y el registro de la campaña (`prospectos/campana/`: `registro.json`, `bajas.json` y `tandas/`). `campana.py` hace `git pull` antes y `git push` después. Si avisa que no pudo sincronizar, no seguir hasta resolverlo.
 - Las bajas se respetan siempre (CAN-SPAM). Quien pidió baja no recibe más mails.
 - Antes de armar una tanda, revisar `ENVIOS_POR_DIA` en `config.py` (calentamiento: semana 1 unos 5 por día, semana 2 de 10 a 15, desde la semana 3 hasta 25).
-- `py campana.py tanda` anota a los prospectos como "armado" con su hora de envío. Claude deja los borradores en Gmail (sin programarlos) y `enviar.py` los manda a su hora desde GitHub Actions (repo `radar-datos`, cada 15 minutos en días hábiles). El borrador es la aprobación: si se borra, no sale. Lo que no salió en el día se libera al día siguiente (primer mail: vuelve a la lista; seguimiento: queda para otro día).
+- Todo corre solo en la nube, en días hábiles: a las 6:47 ART la Action `tanda` de `radar-datos` corre `campana.py tanda --auto` (anota a los prospectos como "armado" con su hora de envío); a las 8:42 ART una tarea programada de Claude escribe los borradores en Gmail según `prospectos/campana/plantillas.md` (sin programarlos); y la Action `envio` (`enviar.py`, cada 15 minutos) primero lee la bandeja (`bandeja.py`: marca solo respuestas, bajas y rebotes) y después manda los borradores a su hora. `py campana.py tanda` a mano sigue funcionando igual. El borrador es la aprobación: si se borra, no sale. Lo que no salió en el día se libera al día siguiente (primer mail: vuelve a la lista; seguimiento: queda para otro día).
 - `credentials.json` y `token_gmail.json` (acceso a Gmail) nunca se leen, imprimen ni suben. En GitHub van como secretos de `radar-datos`.
 - No se arman tandas en fin de semana ni en feriados de EEUU (Thanksgiving, Black Friday, Navidad, etc.), salvo con `--forzar`.
 - Un solo negocio por dominio de empresa en toda la campaña.
@@ -24,13 +24,14 @@ Herramienta de Lucas para armar listas de negocios de EEUU (administradoras, mud
 ## Comandos
 - `py campana.py estado` — resumen de la campaña
 - `py campana.py tanda` — arma la tanda de hoy (verifica reseñas en vivo con Apify)
+- `respondio` / `baja` / `rebote` los marca solo el envío automático al leer la bandeja; a mano sirven para corregir
 - `py campana.py respondio MAIL` — marca que respondió
 - `py campana.py baja MAIL` — pidió no recibir más mails
 - `py campana.py rebote MAIL` — el mail rebotó
 - `py campana.py descartar MAIL` — un mail armado no se manda (primer mail: se descarta; seguimiento: queda para otro día)
 - `py campana.py enviado MAIL` — el mail armado salió (lo usa el envío automático)
 - `py enviar.py --prueba` — muestra qué mails saldrían ahora, sin mandar nada
-- `py gmail_auth.py` — autoriza el acceso a Gmail (una sola vez); `--probar` lo comprueba
+- `py gmail_auth.py` — autoriza el acceso a Gmail (crear y mandar borradores, y leer la bandeja); `--probar` lo comprueba
 - `py -m pytest -q` — corre los tests (también corren solos en GitHub con cada push)
 - Detalle de cada paso: ver `LEEME.md`
 

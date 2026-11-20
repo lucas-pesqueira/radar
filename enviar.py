@@ -5,6 +5,9 @@ Uso (desde esta carpeta):
     py enviar.py --prueba    muestra qué mandaría ahora, sin mandar nada
     py enviar.py --probar    comprueba el acceso a Gmail (cuenta los borradores)
 
+Antes de mandar lee la bandeja (bandeja.py) y marca solo respuestas, bajas y rebotes: a quien
+respondió, pidió la baja o rebotó no le sale nada más, aunque tenga el borrador listo.
+
 Cómo decide:
 - Solo manda mails que están "armados" para hoy en el registro y cuya hora (envio_utc) ya llegó.
 - Busca en Gmail el borrador dirigido a ese mail. Si no hay borrador, no manda nada:
@@ -27,6 +30,7 @@ from email.utils import getaddresses
 
 import requests
 
+import bandeja as B
 import campana as K
 from estudio import BASE
 
@@ -104,6 +108,23 @@ class Gmail:
     def mandar(self, draft_id):
         return self._pedir("POST", "/drafts/send", json={"id": draft_id})
 
+    def ids_bandeja(self, consulta):
+        """Ids de los mails de la bandeja que cumplen la búsqueda (más viejos primero)."""
+        ids, token = [], None
+        while True:
+            params = {"q": consulta, "maxResults": 500}
+            if token:
+                params["pageToken"] = token
+            r = self._pedir("GET", "/messages", params=params)
+            ids += [m["id"] for m in r.get("messages", [])]
+            token = r.get("nextPageToken")
+            if not token:
+                break
+        return ids[::-1]
+
+    def mensaje(self, mid):
+        return self._pedir("GET", f"/messages/{mid}", params={"format": "full"})
+
 
 # ---------------------------------------------------------------------------
 # Qué mandar
@@ -168,26 +189,62 @@ def enviar(prueba=False, ahora=None, gmail=None):
     return enviados, problemas
 
 
-def subir(enviados, dia):
+def revisar_bandeja(gmail, dia):
+    """Marca respuestas, bajas y rebotes antes de mandar. Si falta el permiso de lectura,
+    avisa y sigue (no frena los envíos). Devuelve (marcas, ids revisados)."""
+    registro = K.leer_registro()
+    bajas = K.leer_estricto(K.BAJAS, [], list)
+    try:
+        marcas, vistos = B.revisar(gmail, registro, bajas, dia)
+    except ErrorGmail as e:
+        if " 403 " in f" {e} ":
+            print("AVISO: falta el permiso para leer la bandeja. En la PC: py gmail_auth.py "
+                  "y actualizá el secreto GMAIL_REFRESH_TOKEN. Los envíos siguen igual.")
+            return [], []
+        raise
+    if marcas:
+        K.guardar_seguro(K.BAJAS, bajas)
+        K.guardar_seguro(K.REGISTRO, registro)
+    if vistos:
+        B.guardar_vistos(B.leer_vistos() + vistos)
+    return marcas, vistos
+
+
+def rehacer(enviados, marcas, vistos, dia):
+    """Vuelve a aplicar lo de esta corrida sobre el registro recién bajado de GitHub."""
+    registro = K.leer_registro()
+    bajas = K.leer_estricto(K.BAJAS, [], list)
+    for e, estado, remitente, _ in marcas:
+        B.marcar(registro, bajas, e, estado, dia, [remitente] if estado == "baja" and remitente != e else [])
+    for e in enviados:
+        r = registro.get(e)
+        if r and (r.get("armado") or {}).get("fecha") == dia:
+            K.aplicar_envio(r, dia)
+    K.guardar_json(K.REGISTRO, registro)
+    K.guardar_json(K.BAJAS, bajas)
+    if vistos:
+        B.guardar_vistos(B.leer_vistos() + [v for v in vistos if v not in set(B.leer_vistos())])
+
+
+def subir(enviados, dia, marcas=(), vistos=()):
     """Sube el registro. Si mientras tanto la PC subió otro cambio, se toma el registro nuevo
-    y se vuelven a marcar los enviados (así no se pisa nada)."""
+    y se vuelve a aplicar lo de esta corrida (así no se pisa nada)."""
     if not K._usa_git():
         return
+    partes = [f"{len(enviados)} enviados"] if enviados else []
+    partes += [f"{len(marcas)} marcados por la bandeja"] if marcas else []
+    mensaje = f"Envío automático: {', '.join(partes) or 'bandeja revisada'} ({dia})"
     for intento in range(3):
         K._git("add", "-A")
-        if K._git("diff", "--cached", "--quiet").returncode != 0:
-            K._git("commit", "-m", f"Enviados {len(enviados)} mails ({dia})")
+        if K._git("diff", "--cached", "--quiet").returncode == 0:
+            return
+        K._git("commit", "-m", mensaje)
         if K._git("push").returncode == 0:
             print("Registro subido a GitHub.")
             return
         K._git("fetch")
         K._git("reset", "--hard", "@{u}")
-        registro = K.leer_registro()
-        for e in enviados:
-            r = registro.get(e)
-            if r and (r.get("armado") or {}).get("fecha") == dia:
-                K.aplicar_envio(r, dia)
-        K.guardar_json(K.REGISTRO, registro)
+        rehacer(enviados, marcas, vistos, dia)
     sys.exit("No se pudo subir el registro a GitHub después de 3 intentos. Los mails SÍ salieron.")
 
 
@@ -195,14 +252,24 @@ def main():
     prueba = "--prueba" in sys.argv
     try:
         if "--probar" in sys.argv:
-            b = Gmail().borradores()
+            g = Gmail()
+            b = g.borradores()
             print(f"Acceso a Gmail OK. Borradores: {sum(len(v) for v in b.values())}")
+            try:
+                print(f"Lectura de la bandeja OK. Mails de los últimos 4 días: {len(g.ids_bandeja(B.BUSQUEDA))}")
+            except ErrorGmail as e:
+                print(f"Lectura de la bandeja: SIN PERMISO todavía ({str(e)[:80]}). Corré py gmail_auth.py")
             return
+        dia = K.hoy().isoformat()
+        marcas, vistos = [], []
+        gmail = None
         if not prueba:
             K.sync_antes()
-        enviados, problemas = enviar(prueba=prueba)
-        if enviados:
-            subir(enviados, K.hoy().isoformat())
+            gmail = Gmail()
+            marcas, vistos = revisar_bandeja(gmail, dia)
+        enviados, problemas = enviar(prueba=prueba, gmail=gmail)
+        if enviados or marcas or vistos:
+            subir(enviados, dia, marcas, vistos)
         if problemas and not prueba:
             # Termina con error para que GitHub avise por mail.
             sys.exit(f"{len(problemas)} mails no salieron. Revisá los borradores.")
