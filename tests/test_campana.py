@@ -52,6 +52,7 @@ def camp(tmp_path, monkeypatch):
     monkeypatch.setattr(c, "BACKUPS", tmp_path / "backups")
     monkeypatch.setattr(c, "lugares_guardados", lambda: {})
     monkeypatch.setattr(c, "token", lambda: "x")
+    monkeypatch.setattr(c, "tokens", lambda: ["x"])
     monkeypatch.setattr(c, "Apify", FakeApify)
     monkeypatch.setattr(c.C, "CONFIRMAR_AL_DIA_SIGUIENTE", True)
     c._respondidos = set()
@@ -414,3 +415,57 @@ def test_auto_push_fallido_termina_con_error(camp, monkeypatch):
     with pytest.raises(SystemExit):
         camp.sync_despues("Tanda", estricto=True)
     camp.sync_despues("Tanda")                                        # sin estricto solo avisa
+
+
+# --- varias cuentas de Apify ------------------------------------------------
+class ApifyPorToken:
+    """Cada token es una cuenta con su crédito libre (inventado)."""
+    CREDITO = {}
+    USADAS = []
+
+    def __init__(self, tok):
+        self.tok = tok
+
+    def credito(self):
+        libre = self.CREDITO.get(self.tok)
+        return (None, None) if libre is None else (5 - libre, 5)
+
+
+def test_usa_la_siguiente_cuenta_si_no_alcanza(camp, monkeypatch):
+    ApifyPorToken.CREDITO = {"t0": 0.2, "t1": None, "t2": 3.0}
+    monkeypatch.setattr(camp, "Apify", ApifyPorToken)
+    monkeypatch.setattr(camp, "tokens", lambda: ["t0", "t1", "t2"])
+    usadas = []
+    original = camp.verificar
+    monkeypatch.setattr(camp, "verificar", lambda api, ids: usadas.append(api.tok) or original(api, ids))
+    t = tanda(camp, monkeypatch, "2026-11-30", limite=5)
+    assert len(t["items"]) == 5 and set(usadas) == {"t2"}
+
+
+def test_sin_credito_en_ninguna_cuenta_frena(camp, monkeypatch):
+    ApifyPorToken.CREDITO = {"t0": 0.1, "t1": 0.2}
+    monkeypatch.setattr(camp, "Apify", ApifyPorToken)
+    monkeypatch.setattr(camp, "tokens", lambda: ["t0", "t1"])
+    with pytest.raises(SystemExit, match="entre todas las cuentas"):
+        tanda(camp, monkeypatch, "2026-11-30", limite=5)
+    assert reg(camp) == {}
+
+
+def test_cuentas_descuentan_lo_que_reservan(camp, monkeypatch):
+    ApifyPorToken.CREDITO = {"a": 1.0, "b": 1.0}
+    monkeypatch.setattr(camp, "Apify", ApifyPorToken)
+    cu = camp.Cuentas(["a", "b"])
+    assert cu.para(0.6)["n"] == 1 and cu.para(0.6)["n"] == 2 and cu.para(0.6) is None
+    assert cu.libre_total() == 0.8
+
+
+def test_orden_de_los_archivos_de_token(tmp_path, monkeypatch):
+    import estudio
+    for nombre, valor in [("token_apify10.txt", "j"), ("token_apify2.txt", "c"), ("token_apify.txt", "a"),
+                          ("token_apify1.txt", "b"), ("token_apify3.txt", "")]:
+        (tmp_path / nombre).write_text(valor + "\n", encoding="utf-8")
+    monkeypatch.setattr(estudio, "BASE", tmp_path)
+    monkeypatch.delenv("APIFY_TOKEN", raising=False)
+    assert estudio.tokens() == ["a", "b", "c", "j"]
+    monkeypatch.setenv("APIFY_TOKEN", "x1\ny2, x1")
+    assert estudio.tokens() == ["x1", "y2"]

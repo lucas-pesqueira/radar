@@ -26,6 +26,7 @@ Herramienta de Lucas para armar listas de negocios de EEUU (administradoras, mud
 
 ## Comandos
 - `py campana.py estado` — resumen de la campaña (con alertas)
+- `py campana.py apify` — crédito libre de cada cuenta de Apify (prueba token_apify.txt, token_apify1.txt, token_apify2.txt... en orden y usa la primera con crédito; en la nube, el secreto APIFY_TOKEN puede tener varios, uno por renglón)
 - `py campana.py destrabar` — destraba el freno de emergencia, después de revisar los rebotes o bajas
 - `py campana.py tanda` — arma la tanda de hoy (verifica reseñas en vivo con Apify)
 - `respondio` / `baja` / `rebote` los marca solo el envío automático al leer la bandeja; a mano sirven para corregir

@@ -51,8 +51,33 @@ def guardar_json(p, datos):
     tmp.replace(p)
 
 
+def _orden_token(p):
+    """token_apify.txt primero, después token_apify1.txt, token_apify2.txt... en orden numérico."""
+    resto = p.stem[len("token_apify"):]
+    return (0, 0) if not resto else ((1, int(resto)) if resto.isdigit() else (2, 0))
+
+
+def tokens():
+    """Todos los tokens de Apify, en el orden en que se prueban.
+    En la nube: APIFY_TOKEN (uno o varios, separados por renglones o comas).
+    En la PC: token_apify.txt, token_apify1.txt, token_apify2.txt... Nunca se imprimen."""
+    import re
+    lista = [t for t in re.split(r"[\s,;]+", os.environ.get("APIFY_TOKEN", "")) if t]
+    if not lista:
+        for p in sorted(BASE.glob("token_apify*.txt"), key=_orden_token):
+            t = p.read_text(encoding="utf-8").strip()
+            if t:
+                lista.append(t)
+    vistos, unicos = set(), []
+    for t in lista:
+        if t not in vistos:
+            vistos.add(t)
+            unicos.append(t)
+    return unicos or [token()]
+
+
 def token():
-    t = os.environ.get("APIFY_TOKEN", "").strip()
+    t = (os.environ.get("APIFY_TOKEN", "").split() or [""])[0].strip()
     if not t and TOKEN.exists():
         t = TOKEN.read_text(encoding="utf-8").strip()
     if not t:

@@ -11,6 +11,7 @@ Uso (desde esta carpeta):
     py campana.py baja MAIL          pidió no recibir más mails: no se le escribe nunca más (ni a nadie de su dominio)
     py campana.py rebote MAIL        el mail rebotó (dirección inválida): no se vuelve a usar
     py campana.py descartar MAIL     el mail armado no se manda (primer mail: se descarta; seguimiento: queda para otro día)
+    py campana.py apify              crédito de cada cuenta de Apify (token_apify.txt, token_apify1.txt...)
     py campana.py destrabar          destraba el freno de emergencia (después de revisar rebotes o bajas)
     py campana.py estado             resumen de la campaña
     py campana.py metricas           envíos, respuestas y tasa por rubro, ciudad y prioridad
@@ -33,7 +34,7 @@ from datetime import date, datetime, timedelta, timezone
 import config as C
 from analisis import fecha
 from apify import Apify, ErrorApify
-from estudio import BASE, guardar_json, leer_json, token
+from estudio import BASE, guardar_json, leer_json, token, tokens
 from prospectar import es_espanol, gancho
 
 try:
@@ -393,6 +394,42 @@ def evaluar(p, lugar, cuando, verificado):
 VERIFICACION = {"rondas": 0, "gasto": 0.0, "credito_libre": None}   # lo de la última tanda (para alertas)
 
 
+class Cuentas:
+    """Las cuentas de Apify disponibles (una por token), en orden. Usa la primera que tenga crédito
+    para lo que hace falta; si se queda corta, pasa a la siguiente. Nunca muestra los tokens."""
+
+    def __init__(self, lista=None):
+        self.cuentas = []
+        for i, t in enumerate(lista if lista is not None else tokens(), 1):
+            api = Apify(t)
+            usado, maximo = api.credito()
+            if usado is None or not maximo:
+                print(f"  Cuenta de Apify {i}: no responde o el token no es válido (se saltea).")
+                continue
+            self.cuentas.append({"n": i, "api": api, "libre": maximo - usado, "usado": usado, "maximo": maximo})
+
+    def libre_total(self):
+        return round(sum(max(c["libre"], 0) for c in self.cuentas), 2)
+
+    def para(self, costo):
+        """La primera cuenta con crédito para 'costo' (lo descuenta), o None."""
+        for c in self.cuentas:
+            if c["libre"] >= costo:
+                c["libre"] -= costo
+                return c
+        return None
+
+
+def cmd_apify():
+    """Muestra el crédito de cada cuenta de Apify (sin mostrar los tokens)."""
+    cu = Cuentas()
+    for c in cu.cuentas:
+        print(f"Cuenta {c['n']}: usado USD {c['usado']:.2f} de {c['maximo']:.2f} este mes (libre USD {c['libre']:.2f})")
+    if not cu.cuentas:
+        sys.exit("Ninguna cuenta de Apify responde: revisá los tokens.")
+    print(f"Total libre: USD {cu.libre_total():.2f}")
+
+
 def tope_verificacion(n):
     """Lo que se reserva en Apify por corrida: Apify exige un tope mínimo de USD 0,50."""
     return max(0.5, costo_verificacion(n) * 1.2 + 0.01)
@@ -401,6 +438,7 @@ def tope_verificacion(n):
 def elegir_nuevos(cand, cupo, prueba, doms_usados):
     """Recorre los candidatos en rondas (verificando con Apify) hasta llenar el cupo."""
     VERIFICACION.update(rondas=0, gasto=0.0, credito_libre=None)
+    cuentas = None
     nuevos, salteados, pos, rondas = [], [], 0, 0
     guardados = None
     api = None
@@ -421,15 +459,16 @@ def elegir_nuevos(cand, cupo, prueba, doms_usados):
             rondas += 1
             ids = [p["place_id"] for p in lote if re.match(r"^(ChIJ|GhIJ)", p["place_id"])]
             if ids:
-                api = api or Apify(token())
-                usado, maximo = api.credito()
+                cuentas = cuentas or Cuentas()
                 costo = tope_verificacion(len(ids))
-                if usado is not None and maximo:
-                    VERIFICACION["credito_libre"] = round(maximo - usado - VERIFICACION["gasto"], 2)
-                if usado is not None and maximo and maximo - usado < costo:
-                    sys.exit(f"No alcanza el crédito de Apify para verificar (hace falta USD {costo:.2f}).")
-                print(f"Verificando {len(ids)} negocios en Google Maps (ronda {rondas}, como máximo USD {costo:.2f})...")
-                frescos = verificar(api, ids)
+                cuenta = cuentas.para(costo)
+                VERIFICACION["credito_libre"] = cuentas.libre_total()
+                if not cuenta:
+                    sys.exit(f"No alcanza el crédito de Apify para verificar (hace falta USD {costo:.2f}; "
+                             f"entre todas las cuentas quedan USD {cuentas.libre_total():.2f}).")
+                print(f"Verificando {len(ids)} negocios en Google Maps (ronda {rondas}, cuenta {cuenta['n']}, "
+                      f"como máximo USD {costo:.2f})...")
+                frescos = verificar(cuenta["api"], ids)
                 VERIFICACION["rondas"] = rondas
                 VERIFICACION["gasto"] += costo
         ahora = datetime.now(timezone.utc)
@@ -760,6 +799,8 @@ def main():
             hecha = cmd_tanda(prueba=prueba, forzar="--forzar" in args, auto=auto)
             if hecha and not prueba:
                 sync_despues(f"Tanda {hoy().isoformat()}", estricto=auto)
+        elif cmd == "apify":
+            cmd_apify()
         elif cmd == "destrabar":
             import control as X
             sync_antes()
