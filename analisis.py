@@ -164,7 +164,8 @@ def metricas_resenas(resenas, ahora):
         m.update(respondidas=0, tasa_respuesta=None, sin_resp_reciente=0, sin_resp_total=0,
                  negativa_sin_resp=False, negativa_fecha=None, negativa_estrellas=None,
                  negativa_texto="", ultima_resena=None, dias_ultima_resena=None,
-                 ultima_respuesta=None, dejo_de_responder=False, resenas_por_mes=0.0)
+                 ultima_respuesta=None, dejo_de_responder=False, resenas_por_mes=0.0,
+                 promedio_reciente=None)
         return m
 
     resp = [x for x in rs if x["respondida"]]
@@ -180,6 +181,10 @@ def metricas_resenas(resenas, ahora):
     m["negativa_fecha"] = neg[0]["fecha"].date().isoformat() if neg else None
     m["negativa_estrellas"] = neg[0]["estrellas"] if neg else None
     m["negativa_texto"] = neg[0]["texto"][:1000] if neg else ""
+
+    # Promedio de estrellas de las más nuevas: si está bastante abajo del rating general, viene bajando.
+    estrellas = [x["estrellas"] for x in rs if x["estrellas"] is not None]
+    m["promedio_reciente"] = round(sum(estrellas) / len(estrellas), 2) if len(estrellas) >= C.MIN_RESENAS_MUESTRA else None
 
     m["ultima_resena"] = rs[0]["fecha"].date().isoformat()
     m["dias_ultima_resena"] = max(0, (ahora - rs[0]["fecha"]).days)
@@ -224,6 +229,13 @@ def puntaje(m, lugar):
     if lugar.get("isAdvertisement"):
         p += 1
         porque.append("paga anuncios en Google")
+    if m.get("dejo_de_responder"):
+        p += 1                                    # respondía y dejó: sabe que importa, le falta tiempo
+        porque.append("dejó de responder")
+    pr = m.get("promedio_reciente")
+    if pr is not None and rating is not None and pr <= rating - C.CAIDA_RATING:
+        p += 1
+        porque.append(f"rating bajando (últimas {pr:g} vs {rating:g})")
     return min(p, 10), " · ".join(porque)
 
 

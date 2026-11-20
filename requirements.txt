@@ -1,3 +1,4 @@
 requests>=2.28
 tzdata
 pytest
+google-auth-oauthlib

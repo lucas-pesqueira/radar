@@ -477,6 +477,9 @@ TODAS_CIUDADES = {**CIUDADES_PROSP, **CIUDADES}
 PROSP_PRIORIDADES = ["A"]
 PROSP_RESERVA_USD = 3.00           # crédito de Apify (sumando todas las cuentas) que la prospección deja para las tandas
 PROSP_MAX_ZONAS = 15               # zonas por corrida automática (la Action se puede correr con otro número)
+CAIDA_RATING = 0.7                 # últimas reseñas este tanto por debajo del rating general = "rating bajando"
+PROSP_ZONAS_PRUEBA = 2             # zonas que se prueban en cada ciudad antes de priorizar por rendimiento
+PROSP_REVISITAR_DIAS = 90          # una zona se vuelve a revisar pasados estos días (después de las nuevas)
 
 PROSP_NEGOCIOS_POR_BUSQUEDA = 20   # por rubro y por zona
 PROSP_RESENAS_POR_NEGOCIO = 5      # alcanzan para ver si responde y encontrar el gancho

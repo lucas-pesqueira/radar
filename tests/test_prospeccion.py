@@ -186,7 +186,8 @@ class TestBuscarEnWeb:
         }
         monkeypatch.setattr(E.requests, "Session", SesionWeb)
         r = E.buscar_en_web("neg-x.com", "neg-x.com")
-        assert r == {"estado": "ok", "email": "hola@neg-x.com", "emails": ["hola@neg-x.com"]}
+        assert (r["estado"], r["email"], r["emails"], r["v"]) == ("ok", "hola@neg-x.com", ["hola@neg-x.com"],
+                                                                 E.BUSQUEDA_VERSION)
 
     def test_prueba_variantes_si_no_carga(self, monkeypatch):
         SesionWeb.PAGINAS = {"https://neg-x.com/": (200, "info@neg-x.com")}
@@ -208,7 +209,8 @@ def test_buscar_todos_reintenta_una_vez_las_caidas(monkeypatch):
             raise RuntimeError("web rara")
         return {"estado": "web caída o bloqueada", "email": None, "emails": []}
     monkeypatch.setattr(E, "buscar_en_web", falso)
-    previos = {"ok-x.com": {"estado": "ok", "email": "a@ok-x.com", "emails": []},
+    previos = {"ok-x.com": {"estado": "ok", "email": "a@ok-x.com", "emails": [], "v": E.BUSQUEDA_VERSION,
+                            "senales": {}},
                "caida-x.com": {"estado": "web caída o bloqueada"},
                "ya-reintentada-x.com": {"estado": "web caída o bloqueada", "reintento": True}}
     webs = {d: d for d in ["ok-x.com", "caida-x.com", "ya-reintentada-x.com", "nueva-x.com", "explota-x.com"]}
@@ -438,7 +440,8 @@ def usar_carpeta(monkeypatch, tmp_path):
     d = salida / "prospeccion"
     for nombre, valor in [("SALIDA", salida), ("DIR", d), ("CRUDO_P", d / "crudo"), ("CRUDO", d / "estudio"),
                           ("ZONAS", d / "zonas.json"), ("EMAILS", d / "emails.json"), ("MX", d / "mx.json"),
-                          ("EXPORTADOS", d / "exportados.json"), ("VIEJO", tmp_path / "datos")]:
+                          ("EXPORTADOS", d / "exportados.json"), ("RENDIMIENTO", d / "rendimiento.json"),
+                          ("VIEJO", tmp_path / "datos")]:
         monkeypatch.setattr(P, nombre, valor)
     (d / "crudo").mkdir(parents=True)
 
@@ -710,3 +713,185 @@ def test_subir_con_git_real_aunque_falte_la_lista(tmp_path, monkeypatch):
     assert P.subir("Prospección: prueba")
     g(a, "pull", "-q")
     assert (a / "prospeccion" / "zonas.json").exists() and (a / "campana" / "registro.json").read_text() == '{"x": 1}'
+
+
+# --- búsqueda de mails mejorada (versión 2) y señales para otros servicios -------------------
+class TestMailsEscondidos:
+    @pytest.mark.parametrize("html,mail", [
+        ("Escribinos: info [at] neg-x [dot] com", "info@neg-x.com"),
+        ("hola(at)neg-x(dot)com", "hola@neg-x.com"),
+        ("ventas {at} neg-x.com", "ventas@neg-x.com"),
+        ('<a href="mailto:owner%40neg-x.com?subject=hi">x</a>', "owner@neg-x.com"),
+        ('{"email":"info\\u0040neg-x.com"}', "info@neg-x.com"),
+        ('<a href="/cdn-cgi/l/email-protection#{hexa}">[email&#160;protected]</a>', "cf@neg-x.com"),
+    ])
+    def test_formas_de_esconder_el_mail(self, html, mail):
+        if "{hexa}" in html:
+            k = 0x2a
+            html = html.replace("{hexa}", f"{k:02x}" + "".join(f"{ord(c) ^ k:02x}" for c in mail))
+        assert mail in E.extraer(html)
+
+    def test_no_inventa_mails_con_at_suelto(self):
+        assert E.extraer("We are open at noon and close at 9 dot com") == set()
+
+
+class TestBuscarMasPaginas:
+    def test_hasta_cuatro_paginas_y_contacto_primero(self, monkeypatch):
+        links = "".join(f'<a href="/{p}">x</a>' for p in ("about", "team", "our-story", "hours", "contact-us"))
+        SesionWeb.PAGINAS = {"http://neg-x.com": (200, links),
+                             "http://neg-x.com/contact-us": (200, "sin mail"),
+                             "http://neg-x.com/about": (200, "sin mail"),
+                             "http://neg-x.com/team": (200, "sin mail"),
+                             "http://neg-x.com/our-story": (200, "dueno [at] neg-x [dot] com")}
+        pedidas = []
+        original = SesionWeb.get
+
+        def get(self, url, **kw):
+            pedidas.append(url)
+            return original(self, url, **kw)
+        monkeypatch.setattr(SesionWeb, "get", get)
+        monkeypatch.setattr(E.requests, "Session", SesionWeb)
+        r = E.buscar_en_web("neg-x.com", "neg-x.com")
+        assert r["email"] == "dueno@neg-x.com"
+        assert pedidas[1] == "http://neg-x.com/contact-us" and "http://neg-x.com/hours" not in pedidas
+
+    def test_rutas_comunes_si_no_hay_links(self, monkeypatch):
+        SesionWeb.PAGINAS = {"http://neg-x.com": (200, "<h1>Bienvenidos</h1>"),
+                             "http://neg-x.com/contact-us": (200, "info@neg-x.com")}
+        monkeypatch.setattr(E.requests, "Session", SesionWeb)
+        assert E.buscar_en_web("neg-x.com", "neg-x.com")["email"] == "info@neg-x.com"
+
+    def test_frena_cuando_encuentra_uno_propio(self, monkeypatch):
+        SesionWeb.PAGINAS = {"http://neg-x.com": (200, 'info@neg-x.com <a href="/contact">c</a>')}
+        pedidas = []
+        original = SesionWeb.get
+        monkeypatch.setattr(SesionWeb, "get", lambda self, url, **kw: pedidas.append(url) or original(self, url, **kw))
+        monkeypatch.setattr(E.requests, "Session", SesionWeb)
+        E.buscar_en_web("neg-x.com", "neg-x.com")
+        assert pedidas == ["http://neg-x.com"]
+
+
+def test_version_nueva_revisa_las_webs_sin_mail(monkeypatch):
+    llamados = []
+    monkeypatch.setattr(E, "buscar_en_web", lambda u, d: llamados.append(d) or {"estado": "ok", "email": None,
+                                                                                 "emails": [], "v": 2})
+    previos = {"sin-mail-x.com": {"estado": "ok", "email": None, "emails": []},                   # v1 sin mail
+               "con-mail-v2-x.com": {"estado": "ok", "email": "a@x-x.com", "v": 2, "senales": {}},  # al día
+               "con-mail-v1-x.com": {"estado": "ok", "email": "a@y-x.com"},                    # sin señales
+               "caida-ya-reintentada-x.com": {"estado": "web caída o bloqueada", "reintento": True}}
+    E.buscar_todos({d: d for d in previos}, previos, hilos=1)
+    assert sorted(llamados) == ["con-mail-v1-x.com", "sin-mail-x.com"]
+
+
+class TestSenales:
+    def test_web_moderna(self):
+        html = '<meta name="viewport" content="width=device-width"> © 2026 Pizza <a href="https://resy.com/x">'
+        s = E.senales_web(html, "https://neg-x.com/")
+        assert s["movil"] and s["https"] and not s["vieja"] and s["reservas"] and s["anio_copyright"] == 2026
+
+    def test_web_vieja(self):
+        from datetime import date
+        s = E.senales_web("<p>Copyright 2012-2019 Joe's</p>", "http://neg-x.com/", date(2026, 11, 20))
+        assert not s["movil"] and not s["https"] and s["vieja"] and s["anio_copyright"] == 2019
+        s = E.senales_web('<meta name="generator" content="Microsoft FrontPage 4.0">', "http://x")
+        assert s["vieja"]
+
+    def test_pedidos_y_redes(self):
+        s = E.senales_web('<a href="https://www.toasttab.com/x">Order</a> instagram.com/pizza', "https://x")
+        assert s["pedidos"] and s["instagram"] and not s["reservas"]
+
+
+# --- orden de zonas (mejora 5), zonas vencidas (mejora 4), orden de los A (mejora 7) --------
+def _zona_bajada(ciudad, zona, dias):
+    P.guardar_json(P.archivo_zona(ciudad, zona), {"ciudad": ciudad, "zona": zona,
+                                                  "fecha": hace(dias), "items": [{"title": "x"}]})
+
+
+class TestOrdenZonas:
+    @pytest.fixture(autouse=True)
+    def carpeta(self, tmp_path, monkeypatch):
+        usar_carpeta(monkeypatch, tmp_path)
+        monkeypatch.setattr(P.C, "PROSP_ZONAS", {"aa": ["a1", "a2", "a3", "a4"], "bb": ["b1", "b2", "b3", "b4"],
+                                                 "cc": ["c1", "c2", "c3"]})
+        monkeypatch.setattr(P.C, "PROSP_ZONAS_PRUEBA", 2)
+
+    def test_ciudades_nuevas_primero_y_despues_por_rendimiento(self):
+        for c, z in [("aa", "a1"), ("aa", "a2"), ("bb", "b1"), ("bb", "b2")]:
+            _zona_bajada(c, z, 5)
+        P.guardar_json(P.RENDIMIENTO, {"aa": {"zonas": 2, "a": 2}, "bb": {"zonas": 2, "a": 12}})
+        orden = P.zonas_pendientes({})
+        assert orden[:2] == [("cc", "c1"), ("cc", "c2")]           # cc no se probó: van sus 2 primeras
+        assert orden[2:4] == [("bb", "b3"), ("bb", "b4")]          # bb rinde 6 A por zona, aa 1
+        assert orden[4:6] == [("aa", "a3"), ("aa", "a4")]
+        assert orden[6:] == [("cc", "c3")]                         # sin datos todavía: al final
+
+    def test_sin_datos_alterna_como_antes(self):
+        assert P.zonas_pendientes({})[:3] == [("aa", "a1"), ("bb", "b1"), ("cc", "c1")]
+
+    def test_vencidas_al_final(self, monkeypatch):
+        monkeypatch.setattr(P.C, "PROSP_REVISITAR_DIAS", 90)
+        _zona_bajada("aa", "a1", 100)
+        _zona_bajada("aa", "a2", 30)
+        orden = P.zonas_pendientes({})
+        assert orden[-1] == ("aa", "a1") and ("aa", "a2") not in orden
+        assert orden.count(("aa", "a1")) == 1
+
+    def test_fecha_de_zonas_json_manda(self):
+        _zona_bajada("aa", "a1", 200)
+        estado = {"aa|a1": {"hecha": True, "fecha": hace(3)}}
+        assert not P.zona_vencida("aa", "a1", estado)
+
+    def test_rendimiento_cuenta_a_por_ciudad(self):
+        negocios = [{"ciudad": "aa", "zona": "a1"}, {"ciudad": "aa", "zona": "a2"},
+                    {"ciudad": "aa", "zona": "a1"}, {"ciudad": "bb", "zona": "estudio"}]
+        filas = [{"ciudad": "aa", "prioridad": "A", "zona": "a1"}, {"ciudad": "aa", "prioridad": "B", "zona": "a2"},
+                 {"ciudad": "bb", "prioridad": "A", "zona": "estudio"}]
+        assert P.rendimiento(negocios, filas) == {"aa": {"zonas": 2, "a": 1}}
+
+
+def test_retoma_corrida_de_zona_que_se_estaba_revisitando():
+    # La zona ya tiene archivo (de hace 100 días) y quedó una corrida nueva a medias: se retoma igual.
+    estado = {"aa|a1": {"run_id": "r1", "cuenta": "x"}, "aa|a2": {"hecha": True, "negocios": 3}}
+    en_curso = [tuple(k.split("|", 1)) for k, v in estado.items() if v.get("run_id") and not v.get("hecha")]
+    assert en_curso == [("aa", "a1")]
+
+
+class TestOrdenDentroDeA:
+    def test_dejo_de_responder_y_rating_bajando_suman(self):
+        base = {"sin_resp_reciente": 1, "negativa_sin_resp": False, "resenas_por_mes": 0.2}
+        p0, _ = A.puntaje(base, {"totalScore": 4.8})
+        p1, porque = A.puntaje({**base, "dejo_de_responder": True, "promedio_reciente": 3.6}, {"totalScore": 4.8})
+        assert p1 == p0 + 2 and "dejó de responder" in porque and "rating bajando" in porque
+
+    def test_promedio_reciente(self):
+        m = A.metricas_resenas([resena(1, 2), resena(5, 3), resena(9, 4)], AHORA)
+        assert m["promedio_reciente"] == 3.0
+        assert A.metricas_resenas([resena(1, 2)], AHORA)["promedio_reciente"] is None
+
+
+class TestDueno:
+    @pytest.mark.parametrize("texto,nombre", [
+        ("<h2>Meet the owner</h2><p>Owner: Maria Lopez has run it since 1998</p>", "Maria"),
+        ("Founded by Mario Rossi in 1998", "Mario"),
+        ("Tony Nguyen, owner and chef", "Tony"),
+        ("Joe Lee - Owner", "Joe"),
+        ("Our team is the best. Owner hours 9-5", None),
+        ("The Smith family owner", None),
+        ("Owner Operated since 1990", None),
+        ("Locally owned by Proudly Serving Atlanta", None),
+        ("<script>var owner = 'Bob'</script><p>Welcome</p>", None),
+    ])
+    def test_nombre_del_dueno(self, texto, nombre):
+        assert E.dueno_web(texto) == nombre
+
+
+def test_revisar_de_nuevo_nunca_pierde_un_mail(monkeypatch):
+    respuestas = {"cae-x.com": {"estado": "web caída o bloqueada", "email": None, "emails": [], "v": 2},
+                  "sin-x.com": {"estado": "ok", "email": None, "emails": [], "senales": {"movil": True}, "v": 2}}
+    monkeypatch.setattr(E, "buscar_en_web", lambda u, d: dict(respuestas[d]))
+    previos = {"cae-x.com": {"estado": "ok", "email": "a@cae-x.com", "emails": ["a@cae-x.com"]},
+               "sin-x.com": {"estado": "ok", "email": "b@sin-x.com", "emails": ["b@sin-x.com"]}}
+    r = E.buscar_todos({d: d for d in previos}, previos, hilos=1)
+    assert r["cae-x.com"]["email"] == "a@cae-x.com" and r["cae-x.com"]["v"] == 2
+    assert not E.necesita_revision(r["cae-x.com"]) and "reintento" not in r["cae-x.com"]
+    assert r["sin-x.com"]["email"] == "b@sin-x.com" and r["sin-x.com"]["senales"] == {"movil": True}

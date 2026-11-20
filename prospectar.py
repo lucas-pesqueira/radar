@@ -78,6 +78,9 @@ def entrada_zona(ubicacion):
     }
 
 
+RENDIMIENTO = DIR / "rendimiento.json"         # A por zona en cada ciudad (lo escribe 'lista')
+
+
 def zonas_en_orden():
     """Alterna ciudades: zona 1 de cada ciudad, después la 2, etc."""
     listas = [[(c, z) for z in zs] for c, zs in C.PROSP_ZONAS.items()]
@@ -87,6 +90,55 @@ def zonas_en_orden():
             if i < len(lst):
                 orden.append(lst[i])
     return orden
+
+
+def fecha_zona(ciudad, zona, estado):
+    """Cuándo se bajó la zona (de zonas.json o, si no está, del archivo)."""
+    f = fecha(estado.get(clave(ciudad, zona), {}).get("fecha"))
+    if f is None and archivo_zona(ciudad, zona).exists():
+        f = fecha(leer_json(archivo_zona(ciudad, zona), {}).get("fecha"))
+    return f
+
+
+def zona_vencida(ciudad, zona, estado, ahora=None):
+    """Bajada hace más de PROSP_REVISITAR_DIAS: aparecieron reseñas nuevas y conviene mirarla otra vez."""
+    if estado.get(clave(ciudad, zona), {}).get("vacia", 0) >= 2:
+        return False
+    f = fecha_zona(ciudad, zona, estado)
+    ahora = ahora or datetime.now(timezone.utc)
+    return f is not None and (ahora - f).days >= C.PROSP_REVISITAR_DIAS
+
+
+def zonas_pendientes(estado, ahora=None):
+    """Qué zonas revisar y en qué orden:
+    1. Las primeras PROSP_ZONAS_PRUEBA de cada ciudad todavía sin probar (alternando ciudades).
+    2. El resto de las nuevas, primero las ciudades que más A dieron por zona.
+    3. Las vencidas (más de PROSP_REVISITAR_DIAS), también por rendimiento."""
+    rend = leer_json(RENDIMIENTO, {})
+
+    def a_por_zona(c):
+        r = rend.get(c) or {}
+        return r["a"] / r["zonas"] if r.get("zonas") else -1   # sin datos: al final de su grupo
+
+    orden = zonas_en_orden()
+    hechas_por_ciudad = {}
+    for c, z in orden:
+        if zona_hecha(c, z, estado):
+            hechas_por_ciudad[c] = hechas_por_ciudad.get(c, 0) + 1
+    prueba, nuevas, vencidas = [], [], []
+    contadas = dict(hechas_por_ciudad)
+    for i, (c, z) in enumerate(orden):
+        if not zona_hecha(c, z, estado):
+            if contadas.get(c, 0) < C.PROSP_ZONAS_PRUEBA:
+                prueba.append((c, z))
+                contadas[c] = contadas.get(c, 0) + 1
+            else:
+                nuevas.append((i, c, z))
+        elif zona_vencida(c, z, estado, ahora):
+            vencidas.append((i, c, z))
+    nuevas.sort(key=lambda x: (-a_por_zona(x[1]), x[0]))
+    vencidas.sort(key=lambda x: (-a_por_zona(x[1]), x[0]))
+    return prueba + [(c, z) for _, c, z in nuevas] + [(c, z) for _, c, z in vencidas]
 
 
 def clave(ciudad, zona):
@@ -139,10 +191,12 @@ def cmd_estimar(cuentas=None):
     estado = leer_json(ZONAS, {})
     todas = zonas_en_orden()
     hechas = [z for z in todas if zona_hecha(*z, estado)]
-    pendientes = [z for z in todas if not zona_hecha(*z, estado)]
+    pendientes = zonas_pendientes(estado)
+    vencidas = sum(1 for z in pendientes if z in hechas)
     cz = costo_zona()
     print(f"Rubros: {', '.join(C.RUBROS[r]['nombre'] for r in C.PROSP_RUBROS)}")
-    print(f"Zonas: {len(todas)} en total | revisadas: {len(hechas)} | faltan: {len(pendientes)}")
+    print(f"Zonas: {len(todas)} en total | revisadas: {len(hechas)} | faltan: {len(pendientes) - vencidas}"
+          + (f" | para volver a mirar (más de {C.PROSP_REVISITAR_DIAS} días): {vencidas}" if vencidas else ""))
     print(f"Cada zona: hasta {len(C.PROSP_RUBROS) * C.PROSP_NEGOCIOS_POR_BUSQUEDA} negocios "
           f"con {C.PROSP_RESENAS_POR_NEGOCIO} reseñas, como máximo USD {cz:.2f}")
     if cuentas is None:
@@ -167,8 +221,7 @@ def cmd_buscar(confirmar=True, max_zonas=None):
     if n is None:
         sys.exit("No se pudo leer el crédito de Apify. Probá de nuevo en un rato.")
     # Primero se retoman corridas que hayan quedado a medias.
-    en_curso = [tuple(k.split("|", 1)) for k, v in estado.items()
-                if v.get("run_id") and not zona_hecha(*k.split("|", 1), estado)]
+    en_curso = [tuple(k.split("|", 1)) for k, v in estado.items() if v.get("run_id") and not v.get("hecha")]
     cola = en_curso + [z for z in pendientes if z not in en_curso]
     if max_zonas is not None:
         cola = cola[:max(0, max_zonas)]
@@ -242,7 +295,8 @@ def cmd_buscar(confirmar=True, max_zonas=None):
             "run_id": run_id, "estado_corrida": run["status"],
             "completa": run["status"] == "SUCCEEDED", "entrada": entrada, "items": items,
         })
-        estado[k] = {"hecha": True, "negocios": len(items), "costo": run.get("usageTotalUsd")}
+        estado[k] = {"hecha": True, "negocios": len(items), "costo": run.get("usageTotalUsd"),
+                     "fecha": datetime.now(timezone.utc).isoformat()}
         guardar_json(ZONAS, estado)
         hechas_ahora += 1
         print(f"  {zona}: {len(items)} negocios ({run['status']}), "
@@ -280,11 +334,15 @@ def subir(mensaje):
     if _git("diff", "--cached", "--quiet").returncode == 0:
         return True
     _git("commit", "-m", mensaje)
+    error = ""
     for _ in range(5):
-        if _git("push").returncode == 0:
+        r = _git("push")
+        if r.returncode == 0:
             return True
+        error = (r.stderr or r.stdout).strip()
         _git("pull", "--rebase")
-    print("  OJO: no se pudo subir el avance a GitHub (se reintenta con la próxima zona).")
+    print("  OJO: no se pudo subir el avance a GitHub (queda guardado acá y se reintenta en la próxima subida).\n"
+          "  Git dijo: " + error[-600:] + "\n  Para subirlo a mano: cd prospectos y después git push")
     return False
 
 
@@ -425,11 +483,32 @@ COLUMNAS = [
     "sin_responder_muestra", "porque", "sin_resp_reciente", "n_muestra", "tasa_respuesta", "negativa_sin_resp", "en_espanol",
     "rating", "resenas_totales", "resenas_por_mes", "web", "telefono", "direccion", "maps",
     "detectado", "place_id",
+    # Para personalizar y para ofrecer otros servicios (vacías si no se pudo ver la web):
+    "dueno", "dejo_de_responder", "promedio_reciente",
+    "web_movil", "web_https", "web_vieja", "anio_copyright", "reservas_online", "pedidos_online",
 ]
 
 
+def si_no(x):
+    return "" if x is None else ("si" if x else "no")
+
+
+def rendimiento(negocios, filas):
+    """Por ciudad: cuántas zonas de la prospección se revisaron y cuántos A salieron de ellas
+    (lo del estudio de nichos no cuenta: eran otras zonas). Ordena las zonas que faltan."""
+    validas = {(c, z) for c, zs in C.PROSP_ZONAS.items() for z in zs}
+    zonas, a = {}, {}
+    for n in negocios:
+        if (n["ciudad"], n["zona"]) in validas:
+            zonas.setdefault(n["ciudad"], set()).add(n["zona"])
+    for f in filas:
+        if f["prioridad"] == "A" and (f["ciudad"], f.get("zona_completa", f["zona"])) in validas:
+            a[f["ciudad"]] = a.get(f["ciudad"], 0) + 1
+    return {c: {"zonas": len(z), "a": a.get(c, 0)} for c, z in sorted(zonas.items())}
+
+
 def cmd_lista():
-    from emails import buscar_todos, chequear_mx
+    from emails import buscar_todos, chequear_mx, necesita_revision
 
     bloques = cargar_bloques()
     if not bloques:
@@ -453,16 +532,18 @@ def cmd_lista():
     # Mails: se buscan solo en las webs de los candidatos que no se revisaron antes.
     webs = {n["dominio"]: n["web"] for n in cand if n["tipo_web"] == "propia" and n["dominio"]}
     previos = leer_json(EMAILS, {})
-    faltan = [d for d in webs if d not in previos
-              or (previos[d].get("estado") != "ok" and not previos[d].get("reintento"))]
+    faltan = [d for d in webs if necesita_revision(previos.get(d))]
     if faltan:
         print(f"Buscando mails en {len(faltan)} webs...")
 
         def avanzar(i, total):
             if i % 25 == 0 or i == total:
                 print(f"  {i}/{total}")
+        sin_mail_antes = {d for d in faltan if not (previos.get(d) or {}).get("email")}
         previos = buscar_todos(webs, previos, avanzar)
         guardar_json(EMAILS, previos)
+        recuperados = sum(1 for d in sin_mail_antes if d in previos and previos[d].get("email"))
+        print(f"Mails encontrados en webs que antes no tenían (o eran nuevas): {recuperados} de {len(sin_mail_antes)}")
 
     from emails import elegir
     for n in cand:
@@ -492,12 +573,26 @@ def cmd_lista():
         lugar = n.pop("_lugar")
         textos = " ".join(str(r.get("text") or "") for r in (lugar.get("reviews") or []))
         n.update(gancho(lugar, n.pop("_ahora")))
+        web = previos.get(n["dominio"]) or {} if n["dominio"] else {}
+        s = web.get("senales") or {}
+        reservas_maps = bool(lugar.get("bookingLinks") or lugar.get("reserveTableUrl")
+                             or lugar.get("tableReservationLinks"))
+        n.update({
+            "web_movil": si_no(s.get("movil")), "web_https": si_no(s.get("https")),
+            "web_vieja": si_no(s.get("vieja")), "anio_copyright": s.get("anio_copyright") or "",
+            "reservas_online": "si" if reservas_maps or s.get("reservas") else ("no" if s else ""),
+            "pedidos_online": si_no(s.get("pedidos")),
+            "dueno": web.get("dueno") or "",
+            "dejo_de_responder": "si" if n.get("dejo_de_responder") else "no",
+            "promedio_reciente": n.get("promedio_reciente") if n.get("promedio_reciente") is not None else "",
+        })
         n.update({
             "prioridad": "C" if n.pop("_c") else (
                 "A" if n["prospecto_calificado"] and (n["tasa_respuesta"] is None
                                                       or n["tasa_respuesta"] < C.PROSP_TASA_MAX_A) else "B"),
             "email_tipo": tipo_email(e, n["dominio"]),
             "en_espanol": es_espanol(textos),
+            "zona_completa": n["zona"],
             "zona": "" if n["zona"] == "estudio" else n["zona"].split(",")[0],
             "detectado": exportados.get(e, hoy),
         })
@@ -509,6 +604,7 @@ def cmd_lista():
     # una reseña negativa sin responder: es el mejor gancho.
     filas = [f for f in filas if f["prioridad"] in C.PROSP_PRIORIDADES
              and (f["prioridad"] != "B" or f.get("negativa_sin_resp") in (True, "si"))]
+    guardar_json(RENDIMIENTO, rendimiento(negocios, todas))
     nuevos = [f for f in filas if f["email"].lower() not in exportados]
     for f in nuevos:
         exportados[f["email"].lower()] = hoy
@@ -528,6 +624,8 @@ def cmd_lista():
           f"{' (B solo con negativa sin responder)' if 'B' in C.PROSP_PRIORIDADES else ''}")
     print(f"Total: {len(filas)} prospectos | nuevos en esta lista: {len(nuevos)}")
     print(f"Archivos en: {SALIDA}")
+    con_dueno = sum(1 for f in filas if f["dueno"])
+    print(f"Con nombre del dueño (sacado de su web, todavía no se usa en los mails): {con_dueno}")
     subir(f"Prospección: lista rearmada ({len(filas)} prospectos, {len(nuevos)} nuevos)")
     return filas, nuevos
 

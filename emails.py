@@ -4,6 +4,7 @@ Mira la página principal y hasta dos páginas de contacto. Sirve para medir qu�
 porcentaje de cada rubro se puede contactar por mail.
 """
 
+import collections
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from html import unescape
@@ -15,8 +16,15 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0 Safari/537.36")
 RE_MAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,24}")
 RE_HREF = re.compile(r"""href\s*=\s*["']([^"'#]+)["']""", re.I)
-RE_CF = re.compile(r"""data-cfemail\s*=\s*["']([0-9a-fA-F]+)["']""")
-PALABRAS_CONTACTO = ("contact", "about", "get-in-touch", "reach-us", "location")
+RE_CF = re.compile(r"""data-cfemail\s*=\s*["']([0-9a-fA-F]+)["']|/cdn-cgi/l/email-protection#([0-9a-fA-F]+)""")
+RE_MAILTO = re.compile(r"""mailto:([^"'?>\s]+)""", re.I)
+# "info [at] negocio [dot] com", "info(at)negocio(dot)com", "info {at} negocio.com": mails escritos para esquivar robots.
+RE_OCULTO = re.compile(r"([a-z0-9._%+-]+)\s*[\[\(\{]\s*(?:at|arroba|@)\s*[\]\)\}]\s*"
+                       r"([a-z0-9-]+(?:\s*(?:[\[\(\{]\s*(?:dot|punto|\.)\s*[\]\)\}]|\.)\s*[a-z0-9-]+)+)", re.I)
+BUSQUEDA_VERSION = 2          # subir este número hace que se vuelvan a revisar las webs donde no se encontró mail
+PALABRAS_CONTACTO = ("contact", "about", "get-in-touch", "reach-us", "location", "team", "connect",
+                     "find-us", "visit", "info", "staff", "our-story", "hours")
+RUTAS_COMUNES = ("/contact", "/contact-us", "/about", "/about-us")   # si la portada no tiene links de contacto
 EXT_FALSAS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".css", ".js", ".ico")
 DOMINIOS_BASURA = (
     "example.com", "sentry.io", "wixpress.com", "sentry-next.wixpress.com", "domain.com",
@@ -53,9 +61,16 @@ def _cf(hexa):
 
 
 def extraer(html):
+    from urllib.parse import unquote
+    crudo = html
     html = unescape(html)
+    html = re.sub(r"\\u0040|\\x40|\\100", "@", html)                  # @ escrito como en JavaScript
     encontrados = set(m.group(0) for m in RE_MAIL.finditer(html))
-    encontrados |= {_cf(h) for h in RE_CF.findall(html)}
+    encontrados |= {_cf(a or b) for a, b in RE_CF.findall(crudo)}
+    encontrados |= {unquote(m) for m in RE_MAILTO.findall(html)}        # mailto:info%40negocio.com
+    for local, dom in RE_OCULTO.findall(html):
+        dom = re.sub(r"\s*[\[\(\{]\s*(?:dot|punto|\.)\s*[\]\)\}]\s*|\s*\.\s*", ".", dom)
+        encontrados.add(f"{local}@{dom}")
     limpios = set()
     for e in encontrados:
         e = e.strip(".-_").lower()
@@ -150,6 +165,67 @@ def variantes(url):
     return out
 
 
+RESERVAS = ("opentable.com", "resy.com", "exploretock.com", "sevenrooms.com", "yelp.com/reservations",
+            "vagaro.com", "booksy.com", "styleseat.com", "fresha.com", "glossgenius.com", "squareup.com/appointments",
+            "square.site/book", "setmore.com", "acuityscheduling.com", "calendly.com", "mindbodyonline.com",
+            "schedulicity.com", "joinblvd.com", "zenoti.com", "gettimely.com", "booker.com", "schedulista.com")
+PEDIDOS = ("toasttab.com", "chownow.com", "doordash.com", "ubereats.com", "grubhub.com", "order.online",
+           "slicelife.com", "menufy.com", "beyondmenu.com", "clover.com/online-ordering", "squareup.com/store")
+GENERADORES_VIEJOS = ("frontpage", "dreamweaver", "iweb", "joomla! 1.", "wordpress 3.", "wordpress 4.",
+                      "homestead", "intuit", "web.com sitebuilder", "yahoo! sitebuilder", "netobjects")
+
+
+def senales_web(html, url_final, ahora=None):
+    """Señales para ofrecer otros servicios, sacadas gratis de la portada que ya se bajó."""
+    from datetime import date
+    anio = (ahora or date.today()).year
+    h = (html or "").lower()
+    anios = [int(a) for a in re.findall(r"(?:©|&copy;|copyright)\s*(?:\d{4}\s*[-–]\s*)?((?:19|20)\d{2})", h)]
+    gen = re.search(r"""<meta[^>]+name=["']generator["'][^>]+content=["']([^"']+)""", h)
+    generador = gen.group(1) if gen else ""
+    return {
+        "movil": bool(re.search(r"""<meta[^>]+name=["']viewport["']""", h)),
+        "https": str(url_final or "").lower().startswith("https://"),
+        "anio_copyright": max(anios) if anios else None,
+        "vieja": (bool(anios) and max(anios) <= anio - 3) or any(g in generador for g in GENERADORES_VIEJOS)
+                 or ".swf" in h,
+        "reservas": any(x in h for x in RESERVAS),
+        "pedidos": any(x in h for x in PEDIDOS),
+        "instagram": "instagram.com/" in h,
+        "facebook": "facebook.com/" in h,
+    }
+
+
+NO_SON_NOMBRES = {"The", "Our", "Your", "We", "She", "He", "They", "This", "That", "Meet", "About", "Owner",
+                  "Founder", "Chef", "Manager", "Team", "Family", "Since", "With", "And", "For", "Contact", "Call",
+                  "Restaurant", "Salon", "Nails", "Spa", "Moving", "Movers", "Property", "Management", "Group",
+                  "Company", "Services", "Inc", "Llc", "Kitchen", "Bar", "Grill", "Cafe", "Studio", "Home", "Homes",
+                  "Real", "Estate", "Realty", "Family", "Is", "Are", "Operated", "Owned", "Serving",
+                  "Locally", "Independently", "Proudly", "Woman", "Veteran", "Minority", "Of", "Since", "Mr", "Mrs", "Ms", "Dr", "Hours", "Menu", "Welcome", "Hello", "Proud"}
+RE_DUENO = [
+    # Dentro de un lookahead para que "Meet the owner. Owner: Maria" no se coma el segundo "Owner".
+    re.compile(r"(?=\b(?i:owner|founder|co-founder|proprietor|owned by|founded by)\s*(?:[:\-–,]|(?i:is)|&)?\s*"
+               r"([A-Z][a-z]{2,14})\b)"),
+    re.compile(r"\b([A-Z][a-z]{2,14})\s+[A-Z][a-z]{1,20}\s*,?\s*(?:\(|-|–|—)?\s*(?i:the\s+)?"
+               r"(?i:owner|founder|co-founder|proprietor)\b"),
+]
+
+
+def dueno_web(html):
+    """Nombre de pila del dueño si la web lo dice ("Owner: Maria Lopez", "Founded by Mario"). Puede ser
+    None. Todavía no se usa en los mails: primero hay que ver qué tan seguido acierta."""
+    texto = re.sub(r"<script.*?</script>|<style.*?</style>", " ", html or "", flags=re.S | re.I)
+    texto = unescape(re.sub(r"<[^>]+>", " ", texto))
+    texto = re.sub(r"\s+", " ", texto)
+    nombres = collections.Counter()
+    for rx in RE_DUENO:
+        for n in rx.findall(texto):
+            n = n.strip().capitalize()
+            if n not in NO_SON_NOMBRES:
+                nombres[n] += 1
+    return nombres.most_common(1)[0][0] if nombres else None
+
+
 def buscar_en_web(url, dominio):
     s = requests.Session()
     s.headers.update(HEADERS)
@@ -159,22 +235,36 @@ def buscar_en_web(url, dominio):
         if html is not None:
             break
     if html is None:
-        return {"estado": "web caída o bloqueada", "email": None, "emails": []}
+        return {"estado": "web caída o bloqueada", "email": None, "emails": [], "v": BUSQUEDA_VERSION}
     mails = extraer(html)
+    senales = senales_web(html, final)
+    textos = [html]
     host = (urlparse(final).hostname or "").lower()
+    sin_www = host[4:] if host.startswith("www.") else host
     candidatos = []
     for href in RE_HREF.findall(html):
-        if href.lower().startswith("mailto:"):
+        if href.lower().startswith(("mailto:", "tel:", "javascript:")):
             continue
-        absoluta = urljoin(final, href)
+        absoluta = urljoin(final, href).split("#")[0]
         h = (urlparse(absoluta).hostname or "").lower()
-        if h == host and any(p in absoluta.lower() for p in PALABRAS_CONTACTO) and absoluta not in candidatos:
+        h = h[4:] if h.startswith("www.") else h
+        ruta = urlparse(absoluta).path.lower()
+        if h == sin_www and any(p in ruta for p in PALABRAS_CONTACTO) and absoluta not in candidatos:
             candidatos.append(absoluta)
-    for extra in candidatos[:2]:
+    # Las de contacto primero: ahí suele estar el mail.
+    candidatos.sort(key=lambda u: 0 if "contact" in u.lower() else 1)
+    if not elegir(mails, dominio) and not candidatos:
+        candidatos = [urljoin(final, r) for r in RUTAS_COMUNES]
+    for extra in candidatos[:4]:
+        if elegir(mails, dominio) and dominio and any(m.endswith("@" + dominio) for m in mails):
+            break                                     # ya hay uno del dominio propio: no hace falta seguir
         h2, _ = _bajar(s, extra)
         if h2:
             mails |= extraer(h2)
-    return {"estado": "ok", "email": elegir(mails, dominio), "emails": sorted(mails)[:10]}
+            textos.append(h2)
+            senales["reservas"] = senales["reservas"] or any(x in h2.lower() for x in RESERVAS)
+    return {"estado": "ok", "email": elegir(mails, dominio), "emails": sorted(mails)[:10],
+            "senales": senales, "dueno": dueno_web(" ".join(textos)), "v": BUSQUEDA_VERSION}
 
 
 def tiene_mx(dominio, sesion=None):
@@ -206,24 +296,41 @@ def chequear_mx(dominios, previos=None, hilos=12):
     return resultados
 
 
+def necesita_revision(r):
+    """¿Hay que (volver a) mirar esta web? Nueva, caída sin reintentar, o revisada con una búsqueda
+    más vieja sin haber encontrado mail (o sin las señales)."""
+    if r is None:
+        return True
+    if r.get("estado") != "ok":
+        return not r.get("reintento")                 # una web caída se reintenta una sola vez
+    return r.get("v", 1) < BUSQUEDA_VERSION and (not r.get("email") or "senales" not in r)
+
+
 def buscar_todos(webs, previos=None, al_avanzar=None, hilos=12):
     """webs: {dominio: url}. Devuelve {dominio: resultado}. Saltea los ya revisados, salvo
     las webs que no cargaron: a esas les da un segundo intento."""
     resultados = dict(previos or {})
-    pendientes = {d: u for d, u in webs.items()
-                  if d not in resultados
-                  or (resultados[d].get("estado") != "ok" and not resultados[d].get("reintento"))}
+    pendientes = {d: u for d, u in webs.items() if necesita_revision(resultados.get(d))}
     reintentos = {d for d in pendientes if d in resultados}
     with ThreadPoolExecutor(max_workers=hilos) as ex:
         futuros = {ex.submit(buscar_en_web, u, d): d for d, u in pendientes.items()}
         for i, f in enumerate(as_completed(futuros), 1):
             d = futuros[f]
+            previo = resultados.get(d)
             try:
-                resultados[d] = f.result()
+                nuevo = f.result()
             except Exception as e:  # una web rara no frena al resto
-                resultados[d] = {"estado": f"error: {type(e).__name__}", "email": None, "emails": []}
-            if d in reintentos:
-                resultados[d]["reintento"] = True
+                nuevo = {"estado": f"error: {type(e).__name__}", "email": None, "emails": []}
+            if previo and previo.get("estado") == "ok":
+                # Se volvía a mirar con la búsqueda nueva: nunca se pierde lo que ya se había encontrado.
+                if nuevo.get("estado") != "ok":
+                    nuevo = {**previo, "v": BUSQUEDA_VERSION}
+                elif not nuevo.get("email") and previo.get("email"):
+                    nuevo = {**nuevo, "email": previo["email"],
+                             "emails": sorted(set(nuevo.get("emails") or []) | set(previo.get("emails") or []))[:10]}
+            elif d in reintentos:
+                nuevo["reintento"] = True
+            resultados[d] = nuevo
             if al_avanzar:
                 al_avanzar(i, len(pendientes))
     return resultados

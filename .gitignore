@@ -7,3 +7,5 @@ __pycache__/
 /API
 /Personal
 /py
+credentials.json
+token_gmail.json
