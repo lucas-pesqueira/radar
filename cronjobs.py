@@ -15,6 +15,7 @@ Las claves no se guardan en ningún archivo: quedan solo en cron-job.org (la de 
 import getpass
 import json
 import sys
+import time
 
 import requests
 
@@ -55,8 +56,14 @@ def armar_tarea(titulo, datos, token_github):
 
 
 def cron(metodo, ruta, clave, **kw):
-    r = requests.request(metodo, API_CRON + ruta, timeout=30,
-                         headers={"Authorization": f"Bearer {clave}", "Content-Type": "application/json"}, **kw)
+    """Llama a la API de cron-job.org. Respeta su límite (1 creación por segundo) y reintenta si se pasa."""
+    for intento in range(5):
+        time.sleep(2)
+        r = requests.request(metodo, API_CRON + ruta, timeout=30,
+                             headers={"Authorization": f"Bearer {clave}", "Content-Type": "application/json"}, **kw)
+        if r.status_code != 429:
+            break
+        time.sleep(15 * (intento + 1))
     if r.status_code >= 300:
         sys.exit(f"cron-job.org respondió {r.status_code}: {r.text[:300]}")
     return r.json() if r.text.strip() else {}
