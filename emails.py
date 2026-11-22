@@ -21,7 +21,15 @@ RE_MAILTO = re.compile(r"""mailto:([^"'?>\s]+)""", re.I)
 # "info [at] negocio [dot] com", "info(at)negocio(dot)com", "info {at} negocio.com": mails escritos para esquivar robots.
 RE_OCULTO = re.compile(r"([a-z0-9._%+-]+)\s*[\[\(\{]\s*(?:at|arroba|@)\s*[\]\)\}]\s*"
                        r"([a-z0-9-]+(?:\s*(?:[\[\(\{]\s*(?:dot|punto|\.)\s*[\]\)\}]|\.)\s*[a-z0-9-]+)+)", re.I)
-BUSQUEDA_VERSION = 2          # subir este número hace que se vuelvan a revisar las webs donde no se encontró mail
+try:
+    import gender_guesser.detector  # noqa: F401  (para el nombre del dueño)
+    _HAY_NOMBRES = True
+except ImportError:
+    _HAY_NOMBRES = False
+# Subir este número hace que se vuelvan a revisar todas las webs (gratis, ~15 min).
+# v3 (22/11/2026): el nombre del dueño tiene que ser un nombre de pila conocido. Sin gender-guesser
+# instalado se queda en 2, para no volver a bajar todo y guardarlo sin nombres.
+BUSQUEDA_VERSION = 3 if _HAY_NOMBRES else 2
 PALABRAS_CONTACTO = ("contact", "about", "get-in-touch", "reach-us", "location", "team", "connect",
                      "find-us", "visit", "info", "staff", "our-story", "hours")
 RUTAS_COMUNES = ("/contact", "/contact-us", "/about", "/about-us")   # si la portada no tiene links de contacto
@@ -211,6 +219,23 @@ RE_DUENO = [
 ]
 
 
+_DETECTOR = None
+
+
+def es_nombre_de_pila(n):
+    """¿Es un nombre de pila conocido? (diccionario de unos 40.000 nombres de gender-guesser).
+    Descarta "Portal", "Login", "Midtown"... que salían de botones como "Owner Portal".
+    Sin la librería instalada no arriesga: devuelve False."""
+    global _DETECTOR
+    if _DETECTOR is None:
+        try:
+            import gender_guesser.detector as g
+            _DETECTOR = g.Detector(case_sensitive=False)
+        except ImportError:
+            _DETECTOR = False
+    return bool(_DETECTOR) and _DETECTOR.get_gender(n) != "unknown"
+
+
 def dueno_web(html):
     """Nombre de pila del dueño si la web lo dice ("Owner: Maria Lopez", "Founded by Mario"). Puede ser
     None. Todavía no se usa en los mails: primero hay que ver qué tan seguido acierta."""
@@ -221,7 +246,7 @@ def dueno_web(html):
     for rx in RE_DUENO:
         for n in rx.findall(texto):
             n = n.strip().capitalize()
-            if n not in NO_SON_NOMBRES:
+            if n not in NO_SON_NOMBRES and es_nombre_de_pila(n):
                 nombres[n] += 1
     return nombres.most_common(1)[0][0] if nombres else None
 
@@ -303,7 +328,7 @@ def necesita_revision(r):
         return True
     if r.get("estado") != "ok":
         return not r.get("reintento")                 # una web caída se reintenta una sola vez
-    return r.get("v", 1) < BUSQUEDA_VERSION and (not r.get("email") or "senales" not in r)
+    return r.get("v", 1) < BUSQUEDA_VERSION
 
 
 def buscar_todos(webs, previos=None, al_avanzar=None, hilos=12):

@@ -671,6 +671,9 @@ def cmd_lista():
           f"{' (B solo con negativa sin responder)' if 'B' in C.PROSP_PRIORIDADES else ''}")
     print(f"Total: {len(filas)} prospectos | nuevos en esta lista: {len(nuevos)}")
     print(f"Archivos en: {SALIDA}")
+    import emails as E
+    if not E._HAY_NOMBRES:
+        print("Aviso: falta instalar gender-guesser (pip install gender-guesser); no se buscan nombres de dueños.")
     con_dueno = sum(1 for f in filas if f["dueno"])
     print(f"Con nombre del dueño (sacado de su web, todavía no se usa en los mails): {con_dueno}")
     subir(f"Prospección: lista rearmada ({len(filas)} prospectos, {len(nuevos)} nuevos)")

@@ -775,12 +775,13 @@ def test_version_nueva_revisa_las_webs_sin_mail(monkeypatch):
     llamados = []
     monkeypatch.setattr(E, "buscar_en_web", lambda u, d: llamados.append(d) or {"estado": "ok", "email": None,
                                                                                  "emails": [], "v": 2})
-    previos = {"sin-mail-x.com": {"estado": "ok", "email": None, "emails": []},                   # v1 sin mail
-               "con-mail-v2-x.com": {"estado": "ok", "email": "a@x-x.com", "v": 2, "senales": {}},  # al día
-               "con-mail-v1-x.com": {"estado": "ok", "email": "a@y-x.com"},                    # sin señales
+    v = E.BUSQUEDA_VERSION
+    previos = {"sin-mail-x.com": {"estado": "ok", "email": None, "emails": []},                   # versión vieja
+               "al-dia-x.com": {"estado": "ok", "email": "a@x-x.com", "v": v, "senales": {}},     # al día
+               "vieja-x.com": {"estado": "ok", "email": "a@y-x.com", "v": v - 1, "senales": {}},  # versión vieja
                "caida-ya-reintentada-x.com": {"estado": "web caída o bloqueada", "reintento": True}}
     E.buscar_todos({d: d for d in previos}, previos, hilos=1)
-    assert sorted(llamados) == ["con-mail-v1-x.com", "sin-mail-x.com"]
+    assert sorted(llamados) == ["sin-mail-x.com", "vieja-x.com"]
 
 
 class TestSenales:
@@ -879,6 +880,9 @@ class TestDueno:
         ("The Smith family owner", None),
         ("Owner Operated since 1990", None),
         ("Locally owned by Proudly Serving Atlanta", None),
+        ("Owner Portal | Owner Login | Request a Proposal", None),
+        ("Visit us in Midtown - owner", None),
+        ("Questions? Owner Resources and Help", None),
         ("<script>var owner = 'Bob'</script><p>Welcome</p>", None),
     ])
     def test_nombre_del_dueno(self, texto, nombre):
@@ -892,7 +896,7 @@ def test_revisar_de_nuevo_nunca_pierde_un_mail(monkeypatch):
     previos = {"cae-x.com": {"estado": "ok", "email": "a@cae-x.com", "emails": ["a@cae-x.com"]},
                "sin-x.com": {"estado": "ok", "email": "b@sin-x.com", "emails": ["b@sin-x.com"]}}
     r = E.buscar_todos({d: d for d in previos}, previos, hilos=1)
-    assert r["cae-x.com"]["email"] == "a@cae-x.com" and r["cae-x.com"]["v"] == 2
+    assert r["cae-x.com"]["email"] == "a@cae-x.com" and r["cae-x.com"]["v"] == E.BUSQUEDA_VERSION
     assert not E.necesita_revision(r["cae-x.com"]) and "reintento" not in r["cae-x.com"]
     assert r["sin-x.com"]["email"] == "b@sin-x.com" and r["sin-x.com"]["senales"] == {"movil": True}
 
