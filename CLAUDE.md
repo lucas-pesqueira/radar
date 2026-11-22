@@ -46,3 +46,4 @@ Herramienta de Lucas para armar listas de negocios de EEUU (administradoras, mud
 
 ## Trabajo entre dos PC
 Código (este repo): antes de empezar `git pull`; al terminar `git add .`, `git commit -m "..."`, `git push`. El registro y los prospectos (repo privado) los sincroniza `campana.py` solo.
+- Plantillas del 22/11/2026 (`campana/plantillas.md` en radar-datos): el primer mail arranca por la reseña sin responder y ofrece la prueba gratis; el seguimiento 1 va sin precio; saludo con `negocio_corto` (`campana.nombre_corto`). `control.py` rechaza el primer mail sin "free" y las frases gastadas (`FRASES_GASTADAS`).

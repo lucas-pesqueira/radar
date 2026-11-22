@@ -46,7 +46,7 @@ def test_borrador_correcto_pasa(X, tipo):
     (lambda t: t.replace("Reply \"no\" and I won't email you again.", ""), "baja"),
     (lambda t: t.replace("Lucas Pesqueira · Tinko Projects", "Lucas"), "firma"),
     (lambda t: t.replace("$59/month", "$99/month"), "precio"),
-    (lambda t: t.replace("Thanks for your time.", "See https://tinkoprojects.com. Thanks."), "links"),
+    (lambda t: t.replace("No contract.", "No contract. See https://tinkoprojects.com."), "links"),
     (lambda t: t.replace("Hi Pizzas Mario team", "Hi [negocio] team"), "plantilla"),
     (lambda t: t.replace("Pizzas Mario", "Otro Negocio"), "negocio"),
     (lambda t: t[:200], "largo"),
@@ -217,13 +217,46 @@ def test_lineas_cortadas_por_gmail(X):
 
 def test_mail_real_de_la_campana_pasa(X):
     """Formato tal cual sale de Gmail (texto plano cortado), con datos inventados."""
-    t = ("Hi Pace Bistro team,\n\nMy name is Lucas. I'm based in Argentina and I just started a small\n"
-         "business helping local restaurants keep up with their Google reviews. I\ncame across yours and "
-         "noticed that none of your 5 most recent reviews have\na reply yet.\n\nTo Alex: \"Hi Alex, thank "
-         "you for the kind words! See you next time.\"\n\nIf you'd like help keeping up with them, I can "
-         "reply to every new review\nwithin 2 business days. It's $59/month with no contract.\n\n"
-         "Thanks for your time.\n\nLucas\n\nLucas Pesqueira \u00b7 Tinko Projects\n"
+    t = ("Hi Pace Bistro team,\n\nAlex's 5-star review from November 16 is still waiting for a reply, and 4\n"
+         "of your 5 most recent reviews are the same. So I wrote a reply you can copy\nand paste:\n\n"
+         "To Alex: \"Hi Alex, thanks for coming in. Glad the risotto was a hit.\"\n\nIt's yours either way, "
+         "no strings attached.\n\nI'm Lucas, and I write review replies for local restaurants. If you'd like,\n"
+         "I'll reply to all your unanswered reviews from the last 30 days for free,\nand you approve each one "
+         "before it goes live. After that it's $59/month to\nkeep up with every new review. No contract.\n\n"
+         "Want me to do it? Just reply \"yes\".\n\nLucas\n\nLucas Pesqueira \u00b7 Tinko Projects\n"
          "Monse\u00f1or Piaggio 55, Avellaneda (1870), Buenos Aires, Argentina \u00b7 Reply\n"
          "\"no\" and I won't email you again.")
     r = {"negocio": "Pace Bistro", "precio": 59}
     assert X.revisar_borrador(t, "Pace Bistro's Google reviews", r, "primer mail") == []
+
+
+def test_plantillas_nuevas(X):
+    """22/11/2026: seguimiento 1 sin precio, saludo con el nombre corto, sin frases gastadas,
+    y el primer mail tiene que ofrecer la prueba gratis."""
+    from tests.ayudas import texto_bien
+    r = {"negocio": "Citiside Property Management", "negocio_corto": "Citiside", "precio": 99,
+         "asunto": "Citiside Property Management's Google reviews"}
+    for tipo in ("primer mail", "seguimiento 1", "seguimiento 2"):
+        t = texto_bien("Citiside", 99, tipo)
+        assert X.revisar_borrador(t, r["asunto"], r, tipo) == [], tipo
+    viejo = texto_bien("Citiside", 99, "primer mail").replace("Hi Citiside team,", "Hi Citiside team,\n\nMy name is Lucas.")
+    assert any("gastadas" in p for p in X.revisar_borrador(viejo, r["asunto"], r, "primer mail"))
+    sin_free = texto_bien("Citiside", 99, "primer mail").replace("for free", "for a while")
+    assert any("gratis" in p for p in X.revisar_borrador(sin_free, r["asunto"], r, "primer mail"))
+    seg1_mal = texto_bien("Citiside", 99, "seguimiento 1").replace("for free", "for $59")
+    assert any("montos" in p for p in X.revisar_borrador(seg1_mal, r["asunto"], r, "seguimiento 1"))
+
+
+@pytest.mark.parametrize("largo,corto", [
+    ("Citiside Property Management", "Citiside"),
+    ("Wirks Moving and Storage", "Wirks"),
+    ("Excalibur Moving & Storage", "Excalibur"),
+    ("Five Star Movers", "Five Star"),
+    ("Yale Management Services", "Yale"),
+    ("Property Management", "Property Management"),        # no deja vacío
+    ("Luigi's Pizzeria", "Luigi's Pizzeria"),
+    ("Luxury Nails & Spa", "Luxury Nails & Spa"),
+])
+def test_nombre_corto(largo, corto):
+    import campana as K
+    assert K.nombre_corto(largo) == corto

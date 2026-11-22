@@ -35,6 +35,9 @@ LINK = re.compile(r"https?://\S+|www\.\S+|\b[a-z0-9-]+\.(?:com|net|org|io|co|us|
 RESTO_PLANTILLA = re.compile(r"\[[^\]\n]{1,40}\]|\{\{|\}\}")
 BAJA_FIRMA = re.compile(r"reply\s+[\"“”']?no[\"“”']?\s+and\s+i\s+won['’]t\s+email\s+you\s+again", re.I)
 PLATA = re.compile(r"\$\s?(\d+(?:[.,]\d+)?)")
+# Suenan a plantilla: si aparecen, el borrador no sale (reglas de plantillas.md del 22/11/2026).
+FRASES_GASTADAS = ("didn't get buried", "thank you for the kind words", "my name is lucas",
+                   "just started a small business", "your feedback is important")
 
 
 def parte_nueva(texto):
@@ -64,8 +67,9 @@ def revisar_borrador(texto, asunto, r, tipo):
         problemas.append('falta la línea de baja (Reply "no" and I won\'t email you again)')
     precio = int(r.get("precio") or 0)
     montos = {int(float(m.replace(",", "."))) for m in PLATA.findall(nuevo)}
+    # Plantillas del 22/11/2026: el seguimiento 1 ya no lleva precio (si lo lleva, tiene que ser el justo).
     permitidos = {precio, descuento(precio)} if tipo == "seguimiento 2" else {precio}
-    if precio not in montos:
+    if precio not in montos and tipo != "seguimiento 1":
         problemas.append(f"no aparece el precio (${precio})")
     if tipo == "seguimiento 2" and descuento(precio) not in montos:
         problemas.append(f"no aparece el descuento (${descuento(precio)})")
@@ -79,8 +83,14 @@ def revisar_borrador(texto, asunto, r, tipo):
     if RESTO_PLANTILLA.search(nuevo):
         problemas.append(f"quedó un resto de plantilla: {RESTO_PLANTILLA.search(nuevo).group(0)}")
     negocio = re.sub(r"\s+", " ", str(r.get("negocio") or "")).strip()
-    if tipo in ("primer mail", "seguimiento 2") and negocio.lower() not in plano:
-        problemas.append(f"no menciona al negocio ({negocio})")
+    corto = re.sub(r"\s+", " ", str(r.get("negocio_corto") or "")).strip() or negocio
+    if tipo in ("primer mail", "seguimiento 2") and negocio.lower() not in plano and corto.lower() not in plano:
+        problemas.append(f"no menciona al negocio ({corto})")
+    if tipo == "primer mail" and "free" not in plano:
+        problemas.append("falta la prueba gratis (free) en el primer mail")
+    gastadas = [f for f in FRASES_GASTADAS if f in plano]
+    if gastadas:
+        problemas.append(f"frases gastadas: {gastadas}")
     norm = lambda s: re.sub(r"^\s*(re|fwd?):\s*", "", s or "", flags=re.I).strip().lower()
     esperado = f"{negocio}'s Google reviews" if tipo == "primer mail" else r.get("asunto", "")
     if norm(asunto) != norm(esperado):

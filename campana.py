@@ -235,6 +235,19 @@ def nombre_prolijo(nombre):
     return re.sub(r"\s+", " ", s).strip(" ,.-")
 
 
+RUBRO_EN_NOMBRE = re.compile(
+    r"\s+(?:&\s+)?(?:property\s+management(?:\s+(?:company|group|services|inc))?|management\s+(?:company|group|services)"
+    r"|moving\s+(?:and|&)\s+storage|moving\s+(?:company|services)|movers(?:\s+inc)?)$", re.I)
+
+
+def nombre_corto(negocio):
+    """Para el saludo: 'Citiside Property Management' -> 'Citiside', 'Wirks Moving and Storage' ->
+    'Wirks'. Solo saca el rubro del final si queda algo; restaurantes y salones quedan igual."""
+    s = str(negocio or "").strip()
+    corto = RUBRO_EN_NOMBRE.sub("", s).strip(" ,&-")
+    return corto if re.search(r"[A-Za-z]{2,}", corto) else s
+
+
 def vencido(p, hoy=None):
     """Los datos del negocio (columna datos_del) tienen más de PROSP_VENCE_DIAS: no se usa.
     Sin esa columna (listas viejas), cuenta como vigente."""
@@ -399,6 +412,7 @@ def evaluar(p, lugar, cuando, verificado):
                         "fecha": g["gancho2_fecha"], "texto": g["gancho2_texto"]})
     return {
         "tipo": "primer mail", "email": p["email"].strip().lower(), "negocio": nombre_prolijo(p["nombre"]),
+        "negocio_corto": nombre_corto(nombre_prolijo(p["nombre"])),
         "negocio_original": p["nombre"], "rubro": p["rubro_nombre"],
         "precio": C.PRECIO_RUBRO.get(rubro_clave(p["rubro_nombre"])),
         "ciudad": p["ciudad_nombre"], "prioridad": p["prioridad"],
@@ -546,6 +560,7 @@ def cmd_tanda(prueba=False, limite=None, forzar=False, auto=False):
     for email, n in segs:
         r = registro[email]
         items.append({"tipo": f"seguimiento {n}", "email": email, "negocio": r["negocio"],
+                      "negocio_corto": nombre_corto(r["negocio"]),
                       "rubro": r["rubro"], "precio": r["precio"], "ciudad": r["ciudad"],
                       "asunto": r["asunto"], "enviado": r["fechas"]["enviado"]})
 
