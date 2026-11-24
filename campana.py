@@ -533,8 +533,28 @@ def _nada_que_hacer(mensaje, auto):
     sys.exit(mensaje)
 
 
+def limite_del_dia(registro, dia, freno=False):
+    """Tope de mails de hoy según la subida gradual (C.RAMPA). Devuelve (tope, explicación)."""
+    d = dia.isoformat()
+    escalones = [n for f, n in C.RAMPA if f <= d] or [C.ENVIOS_POR_DIA]
+    tope = escalones[-1]
+    if len(escalones) == 1:
+        return tope, f"tope {tope}"
+    desde = (dia - timedelta(days=C.RAMPA_DIAS)).isoformat()
+    primeros = [r for r in registro.values() if desde <= (r.get("fechas") or {}).get("enviado", "") < d]
+    rebotes = sum(1 for r in primeros if r.get("estado") == "rebotó")
+    tasa = rebotes / len(primeros) if primeros else 0.0
+    if freno or tasa >= C.RAMPA_REBOTE_MAX:
+        motivo = "freno activo" if freno else f"rebotes {rebotes}/{len(primeros)} ({tasa:.0%})"
+        return escalones[-2], f"tope {escalones[-2]} en vez de {tope} ({motivo})"
+    return tope, f"tope {tope} (rebotes {rebotes}/{len(primeros)} en {C.RAMPA_DIAS} días)"
+
+
 def cmd_tanda(prueba=False, limite=None, forzar=False, auto=False):
-    limite = limite or C.ENVIOS_POR_DIA
+    explicacion_tope = ""
+    if not limite:
+        import control as X
+        limite, explicacion_tope = limite_del_dia(leer_registro(), hoy(), X.freno_activo())
     dia = hoy()
     d = dia.isoformat()
     motivo = motivo_no_habil(dia)
@@ -608,13 +628,13 @@ def cmd_tanda(prueba=False, limite=None, forzar=False, auto=False):
                            "salteados": len(salteados), "rondas": VERIFICACION["rondas"],
                            "gasto_estimado": round(VERIFICACION["gasto"], 2),
                            "credito_libre": VERIFICACION["credito_libre"],
-                           "freno": X.freno_activo()})
+                           "freno": X.freno_activo(), "tope": limite})
         m = X.actualizar(registro, bajas, d)
         for a in m["alertas"]:
             print(f"  ALERTA: {a}")
 
     print(f"\nTanda de {d}{' (prueba)' if prueba else ''}: {len(nuevos)} primeros mails + {len(segs)} seguimientos"
-          f" = {len(items)} de {limite}")
+          f" = {len(items)} de {limite}" + (f" [{explicacion_tope}]" if explicacion_tope else ""))
     if len(todos_segs) > len(segs):
         print(f"  Quedan {len(todos_segs) - len(segs)} seguimientos para el próximo día hábil (no entraron en el cupo).")
     for n, m in salteados:

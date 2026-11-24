@@ -83,7 +83,8 @@ def revisar_borrador(texto, asunto, r, tipo):
     if RESTO_PLANTILLA.search(nuevo):
         problemas.append(f"quedó un resto de plantilla: {RESTO_PLANTILLA.search(nuevo).group(0)}")
     negocio = re.sub(r"\s+", " ", str(r.get("negocio") or "")).strip()
-    corto = re.sub(r"\s+", " ", str(r.get("negocio_corto") or "")).strip() or negocio
+    # El registro no guarda negocio_corto: se calcula igual que en la tanda (sino un "Hi Shannon team" no pasa).
+    corto = re.sub(r"\s+", " ", str(r.get("negocio_corto") or K.nombre_corto(negocio))).strip() or negocio
     if tipo in ("primer mail", "seguimiento 2") and negocio.lower() not in plano and corto.lower() not in plano:
         problemas.append(f"no menciona al negocio ({corto})")
     if tipo == "primer mail" and "free" not in plano:

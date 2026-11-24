@@ -488,3 +488,37 @@ def test_tanda_saltea_mails_de_relleno(camp, monkeypatch):
     monkeypatch.setattr("emails.es_basura", es_basura)                # con el filtro, no
     t = tanda(camp, monkeypatch, "2026-11-30", limite=20)
     assert "example@mail.com" not in {i["email"] for i in t["items"]} and len(t["items"]) == 20
+
+
+# --- subida gradual del tope diario (22/11/2026) --------------------------------------------
+def _reg(enviados, rebotados, dia):
+    reg = {}
+    for i in range(enviados):
+        reg[f"a{i}@neg{i}-x.com"] = {"estado": "rebotó" if i < rebotados else "enviado",
+                                     "fechas": {"enviado": dia}}
+    return reg
+
+
+@pytest.mark.parametrize("hoy_,enviados,rebotes,freno,esperado", [
+    ("2026-11-23", 0, 0, False, 25),
+    ("2026-12-06", 100, 0, False, 25),
+    ("2026-12-07", 100, 2, False, 35),     # 2%: sube
+    ("2026-12-07", 100, 3, False, 25),     # 3%: se queda abajo
+    ("2026-12-07", 100, 0, True, 25),      # freno activo: se queda abajo
+    ("2026-12-21", 100, 0, False, 50),
+    ("2026-12-21", 100, 5, False, 35),
+    ("2027-01-15", 0, 0, False, 50),
+])
+def test_tope_del_dia(hoy_, enviados, rebotes, freno, esperado):
+    from datetime import date, timedelta
+    import campana as K
+    dia = date.fromisoformat(hoy_)
+    reg = _reg(enviados, rebotes, (dia - timedelta(days=3)).isoformat())
+    assert K.limite_del_dia(reg, dia, freno)[0] == esperado
+
+
+def test_tope_no_cuenta_rebotes_viejos():
+    from datetime import date
+    import campana as K
+    reg = _reg(10, 5, "2026-11-10")                       # rebotes de hace más de 14 días
+    assert K.limite_del_dia(reg, date(2026, 12, 7))[0] == 35

@@ -516,7 +516,13 @@ PALABRAS_NEGATIVAS = [
 # ===========================================================================
 # CAMPAÑA DE MAILS
 # ===========================================================================
-ENVIOS_POR_DIA = 25              # total por casilla y por día, contando seguimientos
+ENVIOS_POR_DIA = 25              # total por casilla y por día, contando seguimientos (primer escalón)
+# Subida gradual (22/11/2026): desde cada fecha, ese tope. Solo se sube si en los últimos
+# RAMPA_DIAS días los primeros mails rebotaron menos de RAMPA_REBOTE_MAX y el freno no está activo;
+# si no, se queda un escalón abajo.
+RAMPA = (("2026-11-23", 25), ("2026-12-07", 35), ("2026-12-21", 50))
+RAMPA_DIAS = 14
+RAMPA_REBOTE_MAX = 0.03
 SEGUIMIENTO_DIAS = (3, 7)        # días hábiles desde el primer mail para cada seguimiento
 VERIFICAR_RESENAS = 5            # reseñas que se vuelven a bajar para chequear el gancho
 PRECIO_RUBRO = {                 # precio de fundador en USD por mes

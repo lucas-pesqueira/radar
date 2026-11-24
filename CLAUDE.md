@@ -47,3 +47,4 @@ Herramienta de Lucas para armar listas de negocios de EEUU (administradoras, mud
 ## Trabajo entre dos PC
 Código (este repo): antes de empezar `git pull`; al terminar `git add .`, `git commit -m "..."`, `git push`. El registro y los prospectos (repo privado) los sincroniza `campana.py` solo.
 - Plantillas del 22/11/2026 (`campana/plantillas.md` en radar-datos): el primer mail arranca por la reseña sin responder y ofrece la prueba gratis; el seguimiento 1 va sin precio; saludo con `negocio_corto` (`campana.nombre_corto`). `control.py` rechaza el primer mail sin "free" y las frases gastadas (`FRASES_GASTADAS`).
+- Tope diario con subida gradual (`C.RAMPA`, `campana.limite_del_dia`): 25 desde el 23/11, 35 desde el 7/12 y 50 desde el 21/12, solo si en los últimos 14 días los primeros mails rebotaron menos de 3% y el freno no está activo; si no, queda un escalón abajo. El tope de cada día queda en diario.json (`tope`).

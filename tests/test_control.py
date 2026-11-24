@@ -260,3 +260,11 @@ def test_plantillas_nuevas(X):
 def test_nombre_corto(largo, corto):
     import campana as K
     assert K.nombre_corto(largo) == corto
+
+
+def test_nombre_corto_sin_campo_en_el_registro(X):
+    """23/11/2026: enviar.py pasa la entrada del registro, que no trae negocio_corto."""
+    from tests.ayudas import texto_bien
+    r = {"negocio": "Shannon Property Management", "precio": 99, "asunto": "Shannon Property Management's Google reviews"}
+    t = texto_bien("Shannon", 99, "seguimiento 2")
+    assert X.revisar_borrador(t, r["asunto"], r, "seguimiento 2") == []
