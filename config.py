@@ -522,13 +522,39 @@ ENVIOS_POR_DIA = 25              # total por casilla y por día, contando seguim
 # si no, se queda un escalón abajo.
 RAMPA = (("2026-11-23", 25), ("2026-12-07", 35), ("2026-12-21", 50))
 RAMPA_DIAS = 14
+# Borradores (escribir.py, 24/11/2026): modelo de la API de Claude para las respuestas a reseñas.
+MODELO_ESCRITURA = "claude-sonnet-5-5"
 RAMPA_REBOTE_MAX = 0.03
-SEGUIMIENTO_DIAS = (3, 7)        # días hábiles desde el primer mail para cada seguimiento
+SEGUIMIENTO_DIAS = (3, 7, 12)    # días hábiles desde el primer mail para cada seguimiento
+# Seguimiento 3 (27/11/2026): solo para quienes recibieron el seguimiento 2 desde esta fecha. Al resto
+# el seguimiento 2 viejo les decía "Last note from me" y "I won't write again": no se les escribe más.
+SEG3_DESDE = "2026-11-30"
+# Comparación con la competencia (27/11/2026): en el primer mail se cuenta cuántos de los COMP_VECINOS negocios
+# más cercanos del mismo rubro (de la misma búsqueda en Maps) responden sus reseñas. Solo se menciona si son
+# al menos COMP_MIN: si los vecinos tampoco responden, el dato no ayuda.
+COMP_VECINOS = 5
+COMP_MIN = 2
+COMP_MIN_RESENAS = 3             # un vecino con menos reseñas en la muestra no cuenta
+COMP_TASA = 0.6                  # "responde" = respondió al menos esta proporción de sus últimas reseñas
+# Un vecino cuenta solo si su categoría de Google es del rubro (la búsqueda trae también bares, depósitos,
+# inmobiliarias...). Clave: la búsqueda en Maps; valor: palabras que tiene que tener la categoría.
+COMP_CATEGORIA = {
+    "restaurant": ("restaurant",),
+    "nail salon": ("nail",),
+    "moving company": ("mover", "moving"),
+    "property management company": ("property manage",),
+}
 VERIFICAR_RESENAS = 5            # reseñas que se vuelven a bajar para chequear el gancho
 PRECIO_RUBRO = {                 # precio de fundador en USD por mes
     "administradoras": 99, "mudanzas": 99, "restaurantes": 59, "unas": 59,
 }
 VERIFICAR_RONDAS = 4             # máximo de corridas de Apify por tanda para completar el cupo
+# Verificación de mails (27/11/2026): antes de armar un primer mail se chequea por SMTP (actor de Apify)
+# que la casilla exista. Solo se descartan los "invalid" (la casilla no existe o el dominio no recibe);
+# "catch-all", "unknown" y "risky" se mandan igual (Gmail y Microsoft casi nunca dejan confirmar).
+VERIFICAR_MAILS = True
+ACTOR_MAILS = "pnda~email-verifier"
+PRECIO_MAIL = 0.001              # USD por mail verificado (peor caso, según la página del actor)
 
 # Horario de envío: cada mail sale cerca de las 10 de la mañana en la ciudad del destinatario.
 ZONAS_CIUDAD = {                 # palabra en el nombre de la ciudad -> zona horaria
@@ -547,7 +573,19 @@ ZONAS_CIUDAD = {                 # palabra en el nombre de la ciudad -> zona hor
     "las vegas": "America/Los_Angeles",
 }
 ZONA_LUCAS = "America/Argentina/Buenos_Aires"
-HORA_LOCAL_ENVIO = 10            # primer mail de cada ciudad a esta hora local
+HORA_LOCAL_ENVIO = 10            # (viejo: antes todos salían desde las 10 locales; ahora ver HORARIOS_RUBRO)
+# Horarios por rubro (27/11/2026), en hora local del destinatario: se llena la primera franja y, si no
+# entran, la segunda. Restaurantes: antes del almuerzo o después; uñas: antes de abrir o a la tarde;
+# mudanzas y administradoras: horario de oficina.
+HORARIOS_RUBRO = {
+    "restaurantes": (("09:00", "11:00"), ("14:30", "16:30")),
+    "unas": (("09:00", "11:30"), ("14:00", "16:00")),
+    "mudanzas": (("08:30", "11:30"), ("13:30", "16:00")),
+    "administradoras": (("08:30", "11:30"), ("13:30", "16:00")),
+}
+HORARIOS_DEFECTO = (("09:00", "11:30"), ("13:30", "16:00"))
+# El envío automático corre de 11:02 a 19:47 ART: ningún mail se programa fuera de esto.
+VENTANA_ART = ("11:00", "19:40")
 SEPARACION_MIN = (11, 17)        # minutos entre un mail y el siguiente de la misma ciudad (al azar)
 
 # False: los mails los manda enviar.py (GitHub Actions) y los marca como enviados al mandarlos.

@@ -13,6 +13,11 @@ def texto_bien(negocio, precio, tipo):
                   "unanswered reviews from the last 30 days for free, and nothing goes live without your OK.")
         cita = "\n\nOn Mon, Nov 30, 2026 10:05 AM, Lucas Pesqueira <lucas@ejemplo-tinko.com>\nwrote:\n\n> Hi there\n> $5000"
         return cuerpo + "\n\n" + FIRMA + cita
+    if tipo == "seguimiento 3":
+        cuerpo = (f"Hi {negocio} team,\n\nShould I close the file on the reviews for {negocio}?\n\n"
+                  'If the timing is just wrong, reply "later" and I\'ll check back in a few months. '
+                  "If it's a no, no need to answer: this is my last email.")
+        return cuerpo + "\n\n" + FIRMA + "\n\nOn Tue, Dec 8, 2026 Lucas Pesqueira <lucas@ejemplo-tinko.com> wrote:\n> $5000"
     if tipo == "seguimiento 2":
         desc = 29 if precio <= 59 else 49
         cuerpo = (f"Hi {negocio} team,\n\nLast note from me, I promise.\n\nI'm just getting started (I'm based in "

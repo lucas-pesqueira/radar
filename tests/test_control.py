@@ -35,7 +35,7 @@ FIN = datetime(2026, 11, 30, 23, 0, tzinfo=timezone.utc)
 
 
 # --- calidad del borrador ---------------------------------------------------
-@pytest.mark.parametrize("tipo", ["primer mail", "seguimiento 1", "seguimiento 2"])
+@pytest.mark.parametrize("tipo", ["primer mail", "seguimiento 1", "seguimiento 2", "seguimiento 3"])
 def test_borrador_correcto_pasa(X, tipo):
     asunto = "Pizzas Mario's Google reviews" if tipo == "primer mail" else "Re: Pizzas Mario's Google reviews"
     assert X.revisar_borrador(texto_bien("Pizzas Mario", 59, tipo), asunto, R, tipo) == []

@@ -12,6 +12,7 @@ Uso (desde esta carpeta):
     py campana.py rebote MAIL        el mail rebotó (dirección inválida): no se vuelve a usar
     py campana.py descartar MAIL     el mail armado no se manda (primer mail: se descarta; seguimiento: queda para otro día)
     py campana.py apify              crédito de cada cuenta de Apify (token_apify.txt, token_apify1.txt...)
+    py campana.py verificar MAIL...  chequea si esas casillas existen (no guarda nada; cuesta centavos de Apify)
     py campana.py destrabar          destraba el freno de emergencia (después de revisar rebotes o bajas)
     py campana.py estado             resumen de la campaña
     py campana.py metricas           envíos, respuestas y tasa por rubro, ciudad y prioridad
@@ -22,6 +23,7 @@ Con ese archivo Claude escribe los mails y los deja como borradores en la casill
 
 import csv
 import json
+import math
 import os
 import random
 import re
@@ -54,6 +56,7 @@ DIR = DATOS / "campana"
 REGISTRO = DIR / "registro.json"
 BAJAS = DIR / "bajas.json"
 TANDAS = DIR / "tandas"
+INVALIDOS = DIR / "mails_invalidos.json"   # mails que la verificación dio por inexistentes: no se vuelven a probar
 PROSPECTOS = BASE / "prospectos" / "prospectos_todos.csv"
 BACKUPS = BASE / "datos" / "backups"   # fuera de los dos repos: copias locales antes de cada cambio
 ORDEN_PRIORIDAD = {"A": 0, "B": 1, "C": 2}
@@ -61,7 +64,7 @@ ORDEN_PRIORIDAD = {"A": 0, "B": 1, "C": 2}
 DOMINIOS_LIBRES = {"gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "hotmail.com", "outlook.com",
                    "live.com", "msn.com", "aol.com", "icloud.com", "me.com", "mac.com", "proton.me", "protonmail.com",
                    "comcast.net", "att.net", "sbcglobal.net", "verizon.net", "cox.net", "bellsouth.net"}
-TIPOS_ENVIO = ("primer mail", "seguimiento 1", "seguimiento 2")
+TIPOS_ENVIO = ("primer mail", "seguimiento 1", "seguimiento 2", "seguimiento 3")
 
 
 def dominio(email):
@@ -315,6 +318,59 @@ def verificar(api, place_ids):
     return {l.get("placeId"): l for l in items if l.get("placeId")}
 
 
+def verificar_mails(api, emails):
+    """Chequea por SMTP (actor de Apify) que cada casilla exista. Devuelve {email: estado}, con estado
+    "valid", "invalid", "catch-all", "risky" o "unknown". Lo que no vuelve queda como "unknown"."""
+    entrada = {"emails": list(emails), "checkCatchAll": True, "timeoutSecs": 30, "concurrency": 5}
+    run = api.arrancar(C.ACTOR_MAILS, entrada, tope_mails(len(emails)))
+    run = api.esperar(run["id"], cada=10)
+    estados = {e.lower(): "unknown" for e in emails}
+    for it in api.items(run["defaultDatasetId"]):
+        e = str(it.get("email", "")).strip().lower()
+        if e in estados:
+            estados[e] = str(it.get("status") or "unknown").lower()
+    return estados
+
+
+def tope_mails(n):
+    """Lo que se reserva en Apify para verificar n mails (Apify exige un tope mínimo de USD 0,50)."""
+    return max(0.5, n * C.PRECIO_MAIL * 1.5 + 0.05)
+
+
+def leer_invalidos():
+    return {str(k).lower(): v for k, v in leer_estricto(INVALIDOS, {}, dict).items()}
+
+
+def filtrar_mails(listos, cuentas, prueba):
+    """Saca de 'listos' (lista de (item, dominio)) los mails que la verificación da por inexistentes.
+    Devuelve (buenos, malos). Si la verificación falla, no frena la tanda: pasan todos."""
+    if prueba or not C.VERIFICAR_MAILS or not listos:
+        return listos, []
+    emails = [it["email"] for it, _ in listos]
+    cuenta = cuentas.para(tope_mails(len(emails)))
+    if not cuenta:
+        print("  OJO: no alcanza el crédito de Apify para verificar los mails; salen sin verificar.")
+        return listos, []
+    print(f"Verificando {len(emails)} mails (cuenta {cuenta['n']}, como máximo USD {tope_mails(len(emails)):.2f})...")
+    try:
+        estados = verificar_mails(cuenta["api"], emails)
+    except ErrorApify as e:
+        print(f"  OJO: falló la verificación de mails ({e}); salen sin verificar.")
+        return listos, []
+    VERIFICACION["gasto"] += len(emails) * C.PRECIO_MAIL
+    buenos, malos = [], []
+    for it, de in listos:
+        estado = estados.get(it["email"].lower(), "unknown")
+        it["mail_verificado"] = estado
+        (malos if estado == "invalid" else buenos).append((it, de))
+    if malos:
+        invalidos = leer_invalidos()
+        for it, _ in malos:
+            invalidos[it["email"].lower()] = hoy().isoformat()
+        guardar_seguro(INVALIDOS, invalidos)
+    return buenos, malos
+
+
 # ---------------------------------------------------------------------------
 # Horario de envío
 # ---------------------------------------------------------------------------
@@ -343,21 +399,61 @@ def _a_lucas(dt):
     return dt.astimezone(timezone(timedelta(hours=-3)))
 
 
+def _hm(texto):
+    h, m = map(int, texto.split(":"))
+    return h, m
+
+
+def _ventana_art(d):
+    """La ventana del envío automático de ese día, en UTC."""
+    art = timezone(timedelta(hours=-3))                 # Argentina no cambia de hora
+    (h1, m1), (h2, m2) = _hm(C.VENTANA_ART[0]), _hm(C.VENTANA_ART[1])
+    return (datetime(d.year, d.month, d.day, h1, m1, tzinfo=art).astimezone(timezone.utc),
+            datetime(d.year, d.month, d.day, h2, m2, tzinfo=art).astimezone(timezone.utc))
+
+
+def franjas(it, d, zona):
+    """Franjas de envío del rubro del ítem, en UTC y recortadas a la ventana del envío automático."""
+    lo, hi = _ventana_art(d)
+    out = []
+    for desde, hasta in C.HORARIOS_RUBRO.get(rubro_clave(it.get("rubro")), C.HORARIOS_DEFECTO):
+        a, b = max(_a_utc(d, *_hm(desde), zona), lo), min(_a_utc(d, *_hm(hasta), zona), hi)
+        if a < b:
+            out.append((a, b))
+    return out or [(lo, hi)]
+
+
 def asignar_horarios(items, d):
-    """Cada mail sale cerca de las 10 locales de su ciudad, escalonado y nunca en punto.
+    """Cada mail sale en la franja de su rubro (hora local de su ciudad), escalonado dentro de cada ciudad
+    y nunca en punto. Si la primera franja se llena, va a la segunda.
     Agrega 'hora_art' (para programar en Gmail desde Argentina) y 'envio_utc'."""
     azar = random.Random(f"{d.isoformat()}-{len(items)}")
+    lo, hi = _ventana_art(d)
     por_zona = {}
     for it in items:
         por_zona.setdefault(zona_ciudad(it.get("ciudad")), []).append(it)
     for zona, lista in por_zona.items():
-        t = _a_utc(d, C.HORA_LOCAL_ENVIO, 0, zona) + timedelta(minutes=azar.randint(2, 9))
+        ocupados = []                                   # horarios ya dados en esta ciudad
+        # primero los de franja que cierra antes (restaurantes): así entran todos a la mañana si se puede
+        lista = sorted(lista, key=lambda it: (franjas(it, d, zona)[0][1], franjas(it, d, zona)[0][0]))
+        def hueco(desde, hasta):
+            """El primer horario libre (a SEPARACION_MIN de los demás de la ciudad) entre desde y hasta, o None."""
+            c = desde + timedelta(minutes=azar.randint(2, 9))
+            for o in sorted(ocupados):
+                if abs((c - o).total_seconds()) < C.SEPARACION_MIN[0] * 60:
+                    c = o + timedelta(minutes=azar.randint(*C.SEPARACION_MIN))
+            return c if c <= hasta else None
+
         for it in lista:
-            if _a_lucas(t).minute in (0, 30):                     # nunca en punto ni a la media
+            fr = franjas(it, d, zona)
+            t = next((h for h in (hueco(a, b) for a, b in fr) if h), None)
+            if t is None:                               # no entra en su rubro: después de su última franja
+                t = hueco(fr[-1][1], hi) or hueco(lo, hi) or hi   # (no al mediodía) o el primer hueco del día
+            if _a_lucas(t).minute in (0, 30):           # nunca en punto ni a la media
                 t += timedelta(minutes=1)
+            ocupados.append(t)
             it["hora_art"] = _a_lucas(t).strftime("%H:%M")
             it["envio_utc"] = t.isoformat()
-            t += timedelta(minutes=azar.randint(*C.SEPARACION_MIN))
     return items
 
 
@@ -368,7 +464,7 @@ def seguimientos_pendientes(registro):
     """Prospectos a los que hoy les toca un seguimiento (los que ya tienen un mail armado no)."""
     out, d = [], hoy()
     for email, r in registro.items():
-        if r.get("estado") not in ("enviado", "seguimiento 1") or r.get("armado"):
+        if r.get("estado") not in ("enviado", "seguimiento 1", "seguimiento 2") or r.get("armado"):
             continue
         primero = date.fromisoformat(r["fechas"]["enviado"])
         transcurridos = dias_habiles(primero, d)
@@ -379,6 +475,12 @@ def seguimientos_pendientes(registro):
             desde_seg1 = r["fechas"].get("seguimiento 1")
             if not desde_seg1 or dias_habiles(date.fromisoformat(desde_seg1), d) >= C.SEGUIMIENTO_DIAS[1] - C.SEGUIMIENTO_DIAS[0]:
                 out.append((email, 2))
+        elif r["estado"] == "seguimiento 2" and transcurridos >= C.SEGUIMIENTO_DIAS[2]:
+            desde_seg2 = r["fechas"].get("seguimiento 2") or ""
+            if desde_seg2 < C.SEG3_DESDE:
+                continue                     # su seguimiento 2 prometía que era el último
+            if dias_habiles(date.fromisoformat(desde_seg2), d) >= C.SEGUIMIENTO_DIAS[2] - C.SEGUIMIENTO_DIAS[1]:
+                out.append((email, 3))
     out.sort(key=lambda x: registro[x[0]]["fechas"]["enviado"])
     return out
 
@@ -422,6 +524,88 @@ def evaluar(p, lugar, cuando, verificado):
     }, ""
 
 
+def responde_resenas(lugar):
+    """True si el negocio responde sus reseñas, False si no, None si hay muy pocas para saber."""
+    rv = [r for r in (lugar.get("reviews") or []) if str(r.get("reviewOrigin") or "Google").lower() == "google"]
+    if len(rv) < C.COMP_MIN_RESENAS:
+        return None
+    hechas = sum(1 for r in rv if str(r.get("responseFromOwnerText") or "").strip())
+    return hechas / len(rv) >= C.COMP_TASA
+
+
+def indice_competencia():
+    """{placeId: lista de negocios de la misma búsqueda (rubro) en la misma zona}, de lo que bajó la prospección."""
+    import prospectar as P
+    out = {}
+    for p in sorted(P.CRUDO_P.glob("*.json.gz")):
+        grupos = {}
+        for l in leer_json(p, {}).get("items", []):
+            if l.get("placeId"):
+                grupos.setdefault(str(l.get("searchString") or "").lower(), []).append(l)
+        for lista in grupos.values():
+            for l in lista:
+                out[l["placeId"]] = lista
+    return out
+
+
+def del_rubro(lugar):
+    """La categoría de Google del negocio es del rubro que se buscó (no un bar en la búsqueda de restaurantes)."""
+    palabras = C.COMP_CATEGORIA.get(str(lugar.get("searchString") or "").lower())
+    if not palabras:
+        return True
+    cat = str(lugar.get("categoryName") or "").lower()          # solo la principal: las otras son muy amplias
+    return any(p in cat for p in palabras)
+
+
+def es_cadena(nombre):
+    n = str(nombre or "").lower()
+    return any(m in n for m in C.MARCAS_CADENA)
+
+
+def _simple(nombre):
+    return re.sub(r"[^a-z0-9]", "", str(nombre or "").lower())
+
+
+def competencia(place_id, indice):
+    """Cuántos de los vecinos más cercanos del mismo rubro responden sus reseñas, y el más cercano que lo hace.
+    Devuelve {} si no hay datos o si son menos de COMP_MIN (no ayuda mencionarlo)."""
+    lista = indice.get(place_id) or []
+    yo = next((l for l in lista if l.get("placeId") == place_id), None)
+    loc = (yo or {}).get("location") or {}
+    if not yo or "lat" not in loc or "lng" not in loc:
+        return {}
+    vecinos = []
+    for l in lista:
+        o = l.get("location") or {}
+        if (l is yo or "lat" not in o or l.get("permanentlyClosed") or l.get("temporarilyClosed")
+                or _simple(l.get("title")) == _simple(yo.get("title"))       # otra sucursal del mismo
+                or not del_rubro(l) or es_cadena(l.get("title"))):
+            continue
+        estado = responde_resenas(l)
+        if estado is None:
+            continue
+        # distancia aproximada (alcanza para ordenar dentro de un barrio)
+        dist = (o["lat"] - loc["lat"]) ** 2 + ((o["lng"] - loc["lng"]) * math.cos(math.radians(loc["lat"]))) ** 2
+        vecinos.append((dist, estado, l))
+    vecinos.sort(key=lambda x: x[0])
+    cerca = vecinos[:C.COMP_VECINOS]
+    responden = [l for _, ok, l in cerca if ok]
+    if len(cerca) < C.COMP_VECINOS or len(responden) < C.COMP_MIN:
+        return {}
+    ejemplos = [n for n in (nombre_ejemplo(l.get("title")) for l in responden) if n]
+    if not ejemplos:
+        return {}
+    return {"comp_responden": len(responden), "comp_de": len(cerca), "comp_ejemplo": ejemplos[0]}
+
+
+def nombre_ejemplo(titulo):
+    """Nombre del vecino para citarlo, o "" si no queda presentable."""
+    n = re.split(r"\s*[-–—|]\s+|\s+[-–—|]\s*", nombre_prolijo(titulo))[0].strip(" ,.-")
+    if len(re.sub(r"[^A-Za-z]", "", n)) < 3 or len(n) > 40:
+        return ""
+    return n
+
+
 VERIFICACION = {"rondas": 0, "gasto": 0.0, "credito_libre": None}   # lo de la última tanda (para alertas)
 
 
@@ -440,6 +624,16 @@ def cmd_apify():
     print(f"Total libre: USD {cu.libre_total():.2f}")
 
 
+def cmd_verificar(emails):
+    """Chequea a mano si unas casillas existen. No toca el registro."""
+    emails = [e.strip().lower() for e in emails]
+    cuenta = Cuentas().para(tope_mails(len(emails)))
+    if not cuenta:
+        sys.exit("No alcanza el crédito de Apify para verificar.")
+    for e, estado in verificar_mails(cuenta["api"], emails).items():
+        print(f"  {e}: {estado}")
+
+
 def tope_verificacion(n):
     """Lo que se reserva en Apify por corrida: Apify exige un tope mínimo de USD 0,50."""
     return max(0.5, costo_verificacion(n) * 1.2 + 0.01)
@@ -451,6 +645,7 @@ def elegir_nuevos(cand, cupo, prueba, doms_usados):
     cuentas = None
     nuevos, salteados, pos, rondas = [], [], 0, 0
     guardados = None
+    indice = None
     api = None
     probados = servidos = 0
     while len(nuevos) < cupo and pos < len(cand):
@@ -482,8 +677,9 @@ def elegir_nuevos(cand, cupo, prueba, doms_usados):
                 VERIFICACION["rondas"] = rondas
                 VERIFICACION["gasto"] += costo
         ahora = datetime.now(timezone.utc)
+        listos = []
         for p in lote:
-            if len(nuevos) >= cupo:
+            if len(nuevos) + len(listos) >= cupo:
                 break
             probados += 1
             de = dominio_empresa(p["email"])
@@ -507,10 +703,21 @@ def elegir_nuevos(cand, cupo, prueba, doms_usados):
             if not it:
                 salteados.append((p["nombre"], motivo))
                 continue
-            nuevos.append(it)
+            if indice is None:
+                indice = indice_competencia()
+            it.update(competencia(pid, indice))
+            listos.append((it, de))
             servidos += 1
             if de:
                 doms_usados.add(de)
+        if listos and not prueba and C.VERIFICAR_MAILS:
+            cuentas = cuentas or Cuentas()
+        buenos, malos = filtrar_mails(listos, cuentas, prueba)
+        nuevos += [it for it, _ in buenos]
+        for it, de in malos:
+            salteados.append((it["negocio"], f"el mail {it['email']} no existe (verificación)"))
+            if de:
+                doms_usados.discard(de)
     return nuevos, salteados
 
 
@@ -593,7 +800,7 @@ def cmd_tanda(prueba=False, limite=None, forzar=False, auto=False):
               f"Revisalo y destrabalo con: py campana.py destrabar")
         cupo = 0
     if cupo > 0:
-        contactados = set(registro) | bajas
+        contactados = set(registro) | bajas | set(leer_invalidos())
         doms_usados = set(doms) | {dominio_empresa(e) for e, r in registro.items()
                                    if r.get("estado") != "descartado"} - {""}
         from emails import es_basura
@@ -834,6 +1041,8 @@ def main():
                 sync_despues(f"Tanda {hoy().isoformat()}", estricto=auto)
         elif cmd == "apify":
             cmd_apify()
+        elif cmd == "verificar" and len(args) > 1:
+            cmd_verificar(args[1:])
         elif cmd == "destrabar":
             import control as X
             sync_antes()

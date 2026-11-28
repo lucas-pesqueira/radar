@@ -306,6 +306,17 @@ def main():
             frenado_ahora = X.activar_freno(K.leer_registro(), dia)
             if frenado_ahora:
                 print(f"FRENO DE EMERGENCIA: {frenado_ahora}. No salen primeros mails hasta destrabarlo.")
+        if not prueba:
+            # Plan B: si a algún mail armado para hoy le falta el borrador, se escribe ahora.
+            try:
+                import escribir as W
+                creados, _, fallidos = W.escribir(gmail, dia)
+                if creados:
+                    print(f"Borradores que faltaban, escritos ahora: {len(creados)}")
+                for e, m in fallidos:
+                    print(f"  SIN BORRADOR  {e}: {m}")
+            except Exception as e:  # nunca frena el envío
+                print(f"No se pudieron completar borradores: {type(e).__name__}: {str(e)[:150]}")
         enviados, problemas = enviar(prueba=prueba, gmail=gmail)
         if frenado_ahora:
             problemas.append(("FRENO", frenado_ahora))

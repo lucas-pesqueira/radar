@@ -69,7 +69,7 @@ def revisar_borrador(texto, asunto, r, tipo):
     montos = {int(float(m.replace(",", "."))) for m in PLATA.findall(nuevo)}
     # Plantillas del 22/11/2026: el seguimiento 1 ya no lleva precio (si lo lleva, tiene que ser el justo).
     permitidos = {precio, descuento(precio)} if tipo == "seguimiento 2" else {precio}
-    if precio not in montos and tipo != "seguimiento 1":
+    if precio not in montos and tipo not in ("seguimiento 1", "seguimiento 3"):
         problemas.append(f"no aparece el precio (${precio})")
     if tipo == "seguimiento 2" and descuento(precio) not in montos:
         problemas.append(f"no aparece el descuento (${descuento(precio)})")
@@ -85,7 +85,7 @@ def revisar_borrador(texto, asunto, r, tipo):
     negocio = re.sub(r"\s+", " ", str(r.get("negocio") or "")).strip()
     # El registro no guarda negocio_corto: se calcula igual que en la tanda (sino un "Hi Shannon team" no pasa).
     corto = re.sub(r"\s+", " ", str(r.get("negocio_corto") or K.nombre_corto(negocio))).strip() or negocio
-    if tipo in ("primer mail", "seguimiento 2") and negocio.lower() not in plano and corto.lower() not in plano:
+    if tipo in ("primer mail", "seguimiento 2", "seguimiento 3") and negocio.lower() not in plano and corto.lower() not in plano:
         problemas.append(f"no menciona al negocio ({corto})")
     if tipo == "primer mail" and "free" not in plano:
         problemas.append("falta la prueba gratis (free) en el primer mail")
@@ -189,7 +189,7 @@ def _tras(r):
     resp = f.get("respondió")
     if not resp:
         return None
-    for tipo in ("seguimiento 2", "seguimiento 1"):
+    for tipo in ("seguimiento 3", "seguimiento 2", "seguimiento 1"):
         if f.get(tipo) and f[tipo] <= resp:
             return f"tras {tipo}"
     return "tras primer mail"
